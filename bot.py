@@ -1,9 +1,10 @@
-"""Bot del taller - Sprint 1: registro de trabajos.
+"""Bot del taller - Sprint 2: registro de trabajos + consultas.
 
 El mecanico envia un mensaje tipo:
     ABC123 cambio de aceite 45000
 y el bot lo guarda en la base de datos y confirma con una ficha.
-Comandos: /start (prueba de vida). Los reportes llegan en el Sprint 2.
+
+Comandos: /start, /ayuda, /historialdia, /ganancias, /buscar, /borrar.
 """
 import logging
 import os
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -28,6 +30,7 @@ from parser import (
     ParserError,
     parse,
 )
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import db
 
 # Carga las variables del archivo .env (token, ids autorizados, etc.)
@@ -87,9 +90,153 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>placa + trabajo + precio</b>\n"
         "Ejemplo: <code>ABC123 cambio de aceite 45000</code>\n\n"
         "Mándalo así como esté: con $, con separadores y la placa "
-        "al final también me sirven 😉"
+        "al final también me sirven 😉\n"
+        "Escribe <code>/ayuda</code> para ver todos los comandos."
     )
     logger.info("/start de %s", update.effective_user.username)
+
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Menú de comandos (ticket S2-5)."""
+    await update.message.reply_text(
+        "🛠️ <b>Bot del taller — comandos</b>\n\n"
+        "📋 <b>Registrar (solo enviar un mensaje):</b>\n"
+        "<code>ABC123 cambio de aceite 45000</code>\n\n"
+        "🌅 <b>/historialdia</b> — lista de los trabajos de hoy con el total.\n"
+        "📊 <b>/ganancias</b> — suma del día. También:\n"
+        "    <code>/ganancias 7</code> últimos 7 días\n"
+        "    <code>/ganancias mes</code> mes en curso\n"
+        "🔍 <b>/buscar</b> <i>PLACA</i> — historial de un vehículo:\n"
+        "    <code>/buscar ABC123</code>\n"
+        "🗑️ <b>/borrar</b> <i>#</i> — anular un registro mal metido:\n"
+        "    <code>/borrar 5</code>\n"
+        "ℹ️ <b>/ayuda</b> — este menú."
+    )
+
+
+def _linea_trabajo(fila) -> str:
+    """Una línea compacta por trabajo para las listas."""
+    hora = datetime.fromisoformat(fila["fecha_hora"]).strftime("%I:%M %p").lower()
+    return (
+        f"#{fila['id']} {hora} · <b>{fila['placa']}</b> · "
+        f"{fila['descripcion']} · {formatear_dinero(fila['precio'])}"
+    )
+
+
+async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista los trabajos de hoy con total (ticket S2-1)."""
+    filas = db.trabajos_hoy()
+    if not filas:
+        await update.message.reply_text(
+            "😴 Todavía no hay trabajos registrados hoy.\n"
+            "Cuando termines uno, manda el mensaje: "
+            "<code>ABC123 cambio de aceite 45000</code>"
+        )
+        return
+    total = sum(fila["precio"] for fila in filas)
+    lista = "\n".join(_linea_trabajo(fila) for fila in filas)
+    await update.message.reply_text(
+        f"🌅 <b>Trabajos de hoy</b>\n{lista}\n\n"
+        f"💰 <b>Total del día: {formatear_dinero(total)}</b> ({len(filas)} trabajos)"
+    )
+
+
+async def ganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Suma del periodo (ticket S2-2): hoy por defecto, /ganancias 7 o /ganancias mes."""
+    arg = context.args[0].lower() if context.args else ""
+    if arg in ("", "hoy", "dia"):
+        etiqueta, cantidad, suma = db.resumen_periodo()
+    elif arg == "mes":
+        etiqueta, cantidad, suma = db.resumen_periodo(mes=True)
+    elif arg.isdigit() and 1 <= int(arg) <= 365:
+        etiqueta, cantidad, suma = db.resumen_periodo(dias=int(arg))
+    else:
+        await update.message.reply_text(
+            "No entendí el periodo 🤔 Úsalo así:\n"
+            "<code>/ganancias</code> (hoy)\n"
+            "<code>/ganancias 7</code> (últimos 7 días)\n"
+            "<code>/ganancias mes</code> (mes en curso)"
+        )
+        return
+    if cantidad == 0:
+        await update.message.reply_text(
+            f"😌 No hay trabajos registrados en {etiqueta}."
+        )
+        return
+    await update.message.reply_text(
+        f"💼 <b>Ganancias de {etiqueta}</b>\n"
+        f"💰 <b>{formatear_dinero(suma)}</b>\n"
+        f"📋 {cantidad} trabajo{'s' if cantidad != 1 else ''}"
+    )
+
+
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Todo el historial de un vehículo (ticket S2-3)."""
+    if not context.args:
+        await update.message.reply_text(
+            "Dime la placa 🤔\nEjemplo: <code>/buscar ABC123</code>"
+        )
+        return
+    placa = context.args[0].upper()
+    filas, cantidad, suma = db.historial_placa(placa)
+    if cantidad == 0:
+        await update.message.reply_text(
+            f"🚘 No encontré trabajos para la placa <b>{placa}</b>.\n"
+            "(revisa que esté bien escrita, ej: <code>ABC123</code>)"
+        )
+        return
+    lista = "\n".join(_linea_trabajo(fila) for fila in filas)
+    nota = f"\n…(+{cantidad - len(filas)} más antiguos)" if cantidad > len(filas) else ""
+    await update.message.reply_text(
+        f"🚘 <b>{placa}</b> — {cantidad} trabajo{'s' if cantidad != 1 else ''}\n"
+        f"{lista}{nota}\n\n"
+        f"💵 <b>Total histórico: {formatear_dinero(suma)}</b>"
+    )
+
+
+async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pide confirmación y anula un registro (ticket S2-4)."""
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "Dime el número del trabajo 🤔\n"
+            "Ejemplo: <code>/borrar 5</code>\n"
+            "(el número sale en la confirmación: 'Trabajo #5')"
+        )
+        return
+    trabajo_id = int(context.args[0])
+    fila = db.trabajo_por_id(trabajo_id)
+    if fila is None or fila["anulado"]:
+        await update.message.reply_text(f"No encontré el trabajo #{trabajo_id} 🤷")
+        return
+    boton_si = InlineKeyboardButton(
+        "🗑️ Sí, borrar", callback_data=f"borrar_si:{trabajo_id}"
+    )
+    boton_no = InlineKeyboardButton("❌ Cancelar", callback_data=f"borrar_no:{trabajo_id}")
+    await update.message.reply_text(
+        f"¿Seguro que quieres borrar este trabajo? 🤔\n\n{_linea_trabajo(fila)}",
+        reply_markup=InlineKeyboardMarkup([[boton_si], [boton_no]]),
+    )
+
+
+async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Acción al tocar los botones de /borrar."""
+    query = update.callback_query
+    accion, trabajo_id = query.data.split(":")
+
+    if accion == "borrar_si":
+        anulado = db.anular_trabajo(int(trabajo_id))
+        if anulado:
+            await query.edit_message_text(f"🗑️ Trabajo #{trabajo_id} anulado.")
+        else:
+            await query.edit_message_text(
+                f"El trabajo #{trabajo_id} ya estaba anulado 🤷"
+            )
+        logger.info("Borrado trabajo #%s", trabajo_id)
+    else:
+        await query.edit_message_text(
+            "😌 Listo, no quedó borrado nada."
+        )
+    await query.answer()
 
 
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,6 +279,14 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    # Comandos de consulta (Sprint 2)
+    app.add_handler(CommandHandler("ayuda", ayuda))
+    app.add_handler(CommandHandler("historialdia", historialdia))
+    app.add_handler(CommandHandler("ganancias", ganancias))
+    app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CommandHandler("borrar", borrar))
+    # Botones de confirmacion del /borrar (S2-4)
+    app.add_handler(CallbackQueryHandler(confirmar_borrar, pattern=r"^borrar_(si|no):"))
     # Todo texto que no sea comando es un registro (ticket S1-3)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
 
