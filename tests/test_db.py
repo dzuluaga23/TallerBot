@@ -83,3 +83,48 @@ def test_anular_y_trabajo_por_id(bd_temporal):
 
 def test_anular_trabajo_inexistente(bd_temporal):
     assert bd_temporal.anular_trabajo(999) is False
+
+
+# ---------------- Sprint 5: firma y filtros por mecánico ----------------
+
+
+def test_filtro_por_mecanico_en_resumen(bd_temporal):
+    bd = bd_temporal
+    bd.agregar_trabajo("ABC123", "a", 100.0, 1, usuario_id=111, mecanico="Pedro")
+    bd.agregar_trabajo("XYZ789", "b", 200.0, 2, usuario_id=222, mecanico="Juan")
+    etiqueta, cantidad, suma = bd.resumen_periodo(mecanico_id=111)
+    assert (cantidad, suma) == (1, 100.0)
+    # Y para el otro
+    _, cantidad, suma = bd.resumen_periodo(mecanico_id=222)
+    assert (cantidad, suma) == (1, 200.0)
+
+
+def test_desglose_mecanicos(bd_temporal):
+    bd = bd_temporal
+    bd.agregar_trabajo("ABC123", "a", 100.0, 1, usuario_id=111, mecanico="Pedro")
+    bd.agregar_trabajo("XYZ789", "b", 200.0, 2, usuario_id=222, mecanico="Juan")
+    bd.agregar_trabajo("ABB126", "c", 50.0, 2, usuario_id=222, mecanico="Juan")
+    etiqueta, desglose = bd.desglose_mecanicos()
+    assert etiqueta == "hoy"
+    # Orden por suma descendente y agrupado por mecanico
+    assert desglose == [("Juan", 2, 250.0), ("Pedro", 1, 100.0)]
+
+
+def test_placa_historial_filtrado_por_mecanico(bd_temporal):
+    bd = bd_temporal
+    bd.agregar_trabajo("ABC123", "de Pedro", 100.0, 1, usuario_id=111, mecanico="Pedro")
+    bd.agregar_trabajo("ABC123", "de Juan", 200.0, 2, usuario_id=222, mecanico="Juan")
+    filas, cantidad, suma = bd.historial_placa("ABC123", usuario_id=111)
+    assert cantidad == 1
+    assert suma == 100.0
+    assert filas[0]["descripcion"] == "de Pedro"
+
+
+def test_trabajo_viejo_sin_firma_no_se_mezcla_con_mecanico(bd_temporal):
+    bd = bd_temporal
+    bd.agregar_trabajo("ABC123", "sin firma", 100.0, 1)  # usuario_id=None
+    _, cantidad, _ = bd.resumen_periodo(mecanico_id=111)
+    assert cantidad == 0
+    # Pero el dueno si lo ve (filtro None = todos)
+    _, cantidad, _ = bd.resumen_periodo()
+    assert cantidad == 1

@@ -1,11 +1,11 @@
-"""Bot del taller - Sprint 2: registro de trabajos + consultas.
+"""Bot del taller - Sprint 5: roles (dueño/mecánicos), firma y textos limpios.
 
-El mecanico envia un mensaje tipo:
-    ABC123 cambio de aceite 45000
-y el bot lo guarda en la base de datos y confirma con una ficha.
-
-Comandos: /start, /ayuda, /historialdia, /ganancias, /buscar, /borrar.
+- El mecánico envía: ABC123 cambio de aceite 45000 → queda firmado con su nombre.
+- Mecánico: solo ve SUS trabajos/ganancias. Dueño (ADMIN_IDS): ve todo + desglose.
+- Todas las respuestas van con parse_mode=HTML via responder() (nada de '<b>' literal).
 """
+import csv
+import io
 import logging
 import os
 from datetime import datetime
@@ -27,6 +27,8 @@ from telegram.ext import (
     filters,
 )
 
+import db
+import roles
 from parser import (
     MOTIVO_DESCRIPCION,
     MOTIVO_PLACA,
@@ -36,28 +38,70 @@ from parser import (
     ParserError,
     parse,
 )
-import db
 
-# Carga las variables del archivo .env (token, ids autorizados, etc.)
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Lista blanca: solo estos IDs de usuario de Telegram pueden usar el bot
-# (ticket S3-1). En .env van separados por coma: AUTHORIZED_IDS=11,22,33
-IDs_AUTORIZADOS: set[int] = {
-    int(id_texto)
-    for id_texto in os.getenv("AUTHORIZED_IDS", "").replace(",", " ").split()
-    if id_texto.strip()
+# ── Logs: consola + archivo rotativo (S3-3) ─────────────────────────────
+FORMATO_LOG = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+manejador_consola = logging.StreamHandler()
+manejador_consola.setFormatter(logging.Formatter(FORMATO_LOG))
+manejador_archivo = RotatingFileHandler(
+    "taller-bot.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"
+)
+manejador_archivo.setFormatter(logging.Formatter(FORMATO_LOG))
+logging.basicConfig(
+    format=FORMATO_LOG, level=logging.INFO,
+    handlers=[manejador_consola, manejador_archivo],
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger("taller-bot")
+
+# ── Errores del parser (cortos, S1-4/S5-6) ──────────────────────────────
+MENSAJES_DE_ERROR = {
+    MOTIVO_VACIO: "Escríbeme algo 👀",
+    MOTIVO_PLACA: (
+        "No vi la placa 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
+    ),
+    MOTIVO_PRECIO: (
+        "Falta el precio 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
+    ),
+    MOTIVO_DESCRIPCION: (
+        "Falta el trabajo 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
+    ),
+    MOTIVO_VARIAS_PLACAS: (
+        "Vi varias placas 🤔 déjame solo una.\n"
+        "Ej: <code>ABC123 cambio de aceite 45000</code>"
+    ),
 }
+
+EJEMPLO = "<code>ABC123 cambio de aceite 45000</code>"
+
+
+# ── Helpers de formato ──────────────────────────────────────────────────
+
+def formatear_dinero(valor: float) -> str:
+    """45000.0 -> '$ 45.000' (estilo Colombia)."""
+    return f"$ {valor:,.0f}".replace(",", ".")
+
+
+def formatear_fecha(mensaje_dt: datetime) -> str:
+    """16/11/2026 02:45 pm."""
+    return mensaje_dt.strftime("%d/%m/%Y %I:%M %p").lower()
+
+
+async def responder(update: Update, texto: str, **extra) -> None:
+    """ÚNICO canal de respuestas: SIEMPRE lleva formato HTML (fix S5-6)."""
+    await update.message.reply_text(texto, parse_mode="HTML", **extra)
 
 
 def protegido(func):
-    """Decorador: solo deja pasar a los IDs de la lista blanca (S3-1)."""
+    """Solo deja pasar a admins y mecánicos del .env (S3-1)."""
 
     @wraps(func)
     async def envoltura(update, context, *args, **kwargs):
         usuario = update.effective_user.id if update.effective_user else None
-        if usuario not in IDs_AUTORIZADOS:
+        if not roles.es_autorizado(usuario):
             logger.warning(
                 "Acceso denegado: id=%s nombre=%r mensaje=%r",
                 usuario,
@@ -70,322 +114,345 @@ def protegido(func):
     return envoltura
 
 
-# Configura los logs: latido de cada mensaje y errores visibles.
-# Ademas van a archivo taller-bot.log (ticket S3-3), rotado a ~2 MB.
-FORMATO_LOG = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-manejador_consola = logging.StreamHandler()
-manejador_consola.setFormatter(logging.Formatter(FORMATO_LOG))
-manejador_archivo = RotatingFileHandler(
-    "taller-bot.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"
-)
-manejador_archivo.setFormatter(logging.Formatter(FORMATO_LOG))
-logging.basicConfig(
-    format=FORMATO_LOG,
-    level=logging.INFO,
-    handlers=[manejador_consola, manejador_archivo],
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)  # silencia el ruido de red
-logger = logging.getLogger("taller-bot")
-
-# Respuestas cuando el parser no entiende el mensaje (ticket S1-4)
-MENSAJES_DE_ERROR = {
-    MOTIVO_VACIO: "Escríbeme algo 👀",
-    MOTIVO_PLACA: (
-        "No encontré la placa 🤔\n"
-        "Agregué la placa del vehículo al mensaje.\n"
-        "Ejemplos: <code>ABC123 cambio de aceite 45000</code> (carro) "
-        "o <code>KGH12D cambio de tiras 38000</code> (moto)"
-    ),
-    MOTIVO_PRECIO: (
-        "No encontré el precio 🤔\n"
-        "Termina el mensaje con un valor.\n"
-        "Ejemplo: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-    MOTIVO_DESCRIPCION: (
-        "No encontré el trabajo 🤔\n"
-        "Soy un chatbot: necesito la placa, el trabajo y el precio.\n"
-        "Ejemplo: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-    MOTIVO_VARIAS_PLACAS: (
-        "Encontré varias placas 🤔\n"
-        "Deja solo la placa del vehículo que atendiste.\n"
-        "Ejemplo: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-}
+def _linea_trabajo(fila, con_mecanico: bool = False) -> str:
+    """Línea compacta: #7 09:15 · ABC123 · descripcion · $ x [· nombre]"""
+    hora = datetime.fromisoformat(fila["fecha_hora"]).strftime("%I:%M %p").lower()
+    mecanico = f" · {fila['mecanico'] or 'sin firmar'}" if con_mecanico else ""
+    return (
+        f"#{fila['id']} {hora} · <b>{fila['placa']}</b> · "
+        f"{fila['descripcion']} · {formatear_dinero(fila['precio'])}{mecanico}"
+    )
 
 
-def formatear_dinero(valor: float) -> str:
-    """45000.0 -> '$45.000' con separador de miles estilo Colombia."""
-    return f"$ {valor:,.0f}".replace(",", ".")
-
-
-def formatear_fecha(mensaje_dt: datetime) -> str:
-    """16/11/2026 2:45 p.m."""
-    return mensaje_dt.strftime("%d/%m/%Y %I:%M %p").lower()
-
+# ── Comandos ────────────────────────────────────────────────────────────
 
 @protegido
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Respuesta al comando /start."""
-    await update.message.reply_text(
-        "¡Hola! 🛠️ Soy el bot del taller.\n\n"
-        "Para registrar un trabajo, mándame un solo mensaje con:\n"
-        "<b>placa + trabajo + precio</b>\n"
-        "Ejemplo: <code>ABC123 cambio de aceite 45000</code>\n\n"
-        "Mándalo así como esté: con $, con separadores y la placa "
-        "al final también me sirven 😉\n"
-        "Escribe <code>/ayuda</code> para ver todos los comandos."
+    await responder(
+        update,
+        "🛠️ <b>Bot del taller</b>\n"
+        "Mándame un mensaje con <b>placa + trabajo + precio</b>:\n"
+        f"{EJEMPLO}\n/ayuda → comandos",
     )
-    logger.info("/start de %s", update.effective_user.username)
 
 
 @protegido
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menú de comandos (ticket S2-5)."""
-    await update.message.reply_text(
-        "🛠️ <b>Bot del taller — comandos</b>\n\n"
-        "📋 <b>Registrar (solo enviar un mensaje):</b>\n"
-        "<code>ABC123 cambio de aceite 45000</code>\n\n"
-        "🌅 <b>/historialdia</b> — lista de los trabajos de hoy con el total.\n"
-        "📊 <b>/ganancias</b> — suma del día. También:\n"
-        "    <code>/ganancias 7</code> últimos 7 días\n"
-        "    <code>/ganancias mes</code> mes en curso\n"
-        "🔍 <b>/buscar</b> <i>PLACA</i> — historial de un vehículo:\n"
-        "    <code>/buscar ABC123</code>\n"
-        "🗑️ <b>/borrar</b> <i>#</i> — anular un registro mal metido:\n"
-        "    <code>/borrar 5</code>\n"
-        "ℹ️ <b>/ayuda</b> — este menú."
-    )
-
-
-def _linea_trabajo(fila) -> str:
-    """Una línea compacta por trabajo para las listas."""
-    hora = datetime.fromisoformat(fila["fecha_hora"]).strftime("%I:%M %p").lower()
-    return (
-        f"#{fila['id']} {hora} · <b>{fila['placa']}</b> · "
-        f"{fila['descripcion']} · {formatear_dinero(fila['precio'])}"
+    await responder(
+        update,
+        "🛠️ <b>Comandos</b>\n"
+        f"📋 Registro: {EJEMPLO}\n"
+        "🌅 /historialdia — trabajos de hoy\n"
+        "📊 /ganancias [7 | mes] — resumen\n"
+        "🙋 /misganancias — solo lo tuyo\n"
+        "🔍 /buscar PLACA — historial de un vehículo\n"
+        "🗑️ /borrar # — anular un registro\n"
+        "📄 /exportar [7 | mes] — CSV (solo dueño)\n"
+        "ℹ️ /ayuda",
     )
 
 
 @protegido
 async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Lista los trabajos de hoy con total (ticket S2-1)."""
-    filas = db.trabajos_hoy()
+    """Dueño: todos con nombre. Mecánico: solo los suyos (S5-3)."""
+    usuario_solicita = update.effective_user.id
+    es_admin = roles.es_admin(usuario_solicita)
+    filas = (
+        db.trabajos_hoy() if es_admin else db.trabajos_hoy(usuario_id=usuario_solicita)
+    )
     if not filas:
-        await update.message.reply_text(
-            "😴 Todavía no hay trabajos registrados hoy.\n"
-            "Cuando termines uno, manda el mensaje: "
-            "<code>ABC123 cambio de aceite 45000</code>"
-        )
+        await responder(update, "😌 Sin trabajos registrados hoy.")
         return
     total = sum(fila["precio"] for fila in filas)
-    lista = "\n".join(_linea_trabajo(fila) for fila in filas)
-    await update.message.reply_text(
-        f"🌅 <b>Trabajos de hoy</b>\n{lista}\n\n"
-        f"💰 <b>Total del día: {formatear_dinero(total)}</b> ({len(filas)} trabajos)"
+    lista = "\n".join(
+        _linea_trabajo(fila, con_mecanico=es_admin) for fila in filas
+    )
+    quien = "Trabajos de hoy" if es_admin else "Tus trabajos de hoy"
+    await responder(
+        update,
+        f"🌅 <b>{quien}</b>\n{lista}\n\n"
+        f"💰 <b>Total{' del día' if es_admin else ''}: {formatear_dinero(total)}</b>"
+        f" ({len(filas)} trabajo{'s' if len(filas) != 1 else ''})",
     )
 
 
 @protegido
 async def ganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Suma del periodo (ticket S2-2): hoy por defecto, /ganancias 7 o /ganancias mes."""
+    """Dueño: total del taller + desglose. Mecánico: solo lo suyo."""
+    await _reporte_ganancias(update, context, solo_propias=False)
+
+
+@protegido
+async def misganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Alias claro: SIEMPRE lo propio (aunque quien lo mande sea el dueño)."""
+    await _reporte_ganancias(update, context, solo_propias=True)
+
+
+async def _reporte_ganancias(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, solo_propias: bool
+) -> None:
     arg = context.args[0].lower() if context.args else ""
-    if arg in ("", "hoy", "dia"):
-        etiqueta, cantidad, suma = db.resumen_periodo()
-    elif arg == "mes":
-        etiqueta, cantidad, suma = db.resumen_periodo(mes=True)
+    dias = None
+    mes = False
+    if arg == "mes":
+        mes = True
     elif arg.isdigit() and 1 <= int(arg) <= 365:
-        etiqueta, cantidad, suma = db.resumen_periodo(dias=int(arg))
+        dias = int(arg)
+    elif arg not in ("", "hoy", "dia"):
+        await responder(
+            update,
+            "Periodo: <code>/ganancias</code> hoy · <code>/ganancias 7</code> · "
+            "<code>/ganancias mes</code>",
+        )
+        return
+    usuario_solicita = update.effective_user.id
+    solo_del_dueno = roles.es_admin(usuario_solicita) and not solo_propias
+
+    if solo_del_dueno:
+        etiqueta, cantidad, suma = db.resumen_periodo(dias=dias, mes=mes)
+        texto = f"💼 <b>Ganancias de {etiqueta}</b>\n💰 <b>{formatear_dinero(suma)}</b>"
+        # Desglose por mecánico (S5-3)
+        etiqueta2, desglose = db.desglose_mecanicos(dias=dias, mes=mes)
+        if desglose:
+            lineas = "\n".join(
+                f"👤 {nombre}: {formatear_dinero(suma_monto)} ({cantidad}) "
+                for nombre, cantidad, suma_monto in desglose
+            )
+            texto += f"\n\n<b>Por mecánico</b>:\n{lineas}"
+        elif cantidad == 0:
+            texto = f"😌 Sin trabajos en {etiqueta}."
     else:
-        await update.message.reply_text(
-            "No entendí el periodo 🤔 Úsalo así:\n"
-            "<code>/ganancias</code> (hoy)\n"
-            "<code>/ganancias 7</code> (últimos 7 días)\n"
-            "<code>/ganancias mes</code> (mes en curso)"
+        etiqueta, cantidad, suma = db.resumen_periodo(
+            dias=dias, mes=mes, mecanico_id=usuario_solicita
         )
-        return
-    if cantidad == 0:
-        await update.message.reply_text(
-            f"😌 No hay trabajos registrados en {etiqueta}."
+        if cantidad == 0:
+            await responder(update, f"😌 Sin trabajos tuyos en {etiqueta}.")
+            return
+        texto = (
+            f"💼 <b>Tus ganancias de {etiqueta}</b>\n"
+            f"💰 <b>{formatear_dinero(suma)}</b>\n"
+            f"📋 {cantidad} trabajo{'s' if cantidad != 1 else ''}"
         )
-        return
-    await update.message.reply_text(
-        f"💼 <b>Ganancias de {etiqueta}</b>\n"
-        f"💰 <b>{formatear_dinero(suma)}</b>\n"
-        f"📋 {cantidad} trabajo{'s' if cantidad != 1 else ''}"
-    )
+    await responder(update, texto)
 
 
 @protegido
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Todo el historial de un vehículo (ticket S2-3)."""
+    """Dueño: historial completo del vehículo. Mecánico: solo sus registros."""
     if not context.args:
-        await update.message.reply_text(
-            "Dime la placa 🤔\nEjemplo: <code>/buscar ABC123</code>"
-        )
+        await responder(update, "Dime la placa 🤔\nEj: <code>/buscar ABC123</code>")
         return
     placa = context.args[0].upper()
-    filas, cantidad, suma = db.historial_placa(placa)
+    usuario_solicita = update.effective_user.id
+    es_admin = roles.es_admin(usuario_solicita)
+    filas, cantidad, suma = (
+        db.historial_placa(placa)
+        if es_admin
+        else db.historial_placa(placa, usuario_id=usuario_solicita)
+    )
     if cantidad == 0:
-        await update.message.reply_text(
-            f"🚘 No encontré trabajos para la placa <b>{placa}</b>.\n"
-            "(revisa que esté bien escrita, ej: <code>ABC123</code>)"
+        await responder(
+            update,
+            f"🚘 Sin trabajos para <b>{placa}</b>"
+            + ("" if es_admin else " tuyos") + ".",
         )
         return
-    lista = "\n".join(_linea_trabajo(fila) for fila in filas)
-    nota = f"\n…(+{cantidad - len(filas)} más antiguos)" if cantidad > len(filas) else ""
-    await update.message.reply_text(
-        f"🚘 <b>{placa}</b> — {cantidad} trabajo{'s' if cantidad != 1 else ''}\n"
-        f"{lista}{nota}\n\n"
-        f"💵 <b>Total histórico: {formatear_dinero(suma)}</b>"
+    lista = "\n".join(
+        _linea_trabajo(fila, con_mecanico=es_admin) for fila in filas
+    )
+    nota = (
+        f"\n…(+{cantidad - len(filas)} más antiguos)"
+        if cantidad > len(filas) else ""
+    )
+    titulo = f"<b>{placa}</b>" if es_admin else f"<b>{placa}</b> (tus registros)"
+    await responder(
+        update,
+        f"🚘 {titulo} — {cantidad} trabajo{'s' if cantidad != 1 else ''}\n"
+        f"{lista}{nota}\n\n💵 <b>Total: {formatear_dinero(suma)}</b>",
     )
 
 
 @protegido
 async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pide confirmación y anula un registro (ticket S2-4)."""
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text(
-            "Dime el número del trabajo 🤔\n"
-            "Ejemplo: <code>/borrar 5</code>\n"
-            "(el número sale en la confirmación: 'Trabajo #5')"
-        )
+        await responder(update, "Número 🤔 Ej: <code>/borrar 5</code>")
         return
     trabajo_id = int(context.args[0])
     fila = db.trabajo_por_id(trabajo_id)
     if fila is None or fila["anulado"]:
-        await update.message.reply_text(f"No encontré el trabajo #{trabajo_id} 🤷")
+        await responder(update, f"No existe el trabajo #{trabajo_id} 🤷")
         return
-    boton_si = InlineKeyboardButton(
-        "🗑️ Sí, borrar", callback_data=f"borrar_si:{trabajo_id}"
-    )
-    boton_no = InlineKeyboardButton("❌ Cancelar", callback_data=f"borrar_no:{trabajo_id}")
-    await update.message.reply_text(
-        f"¿Seguro que quieres borrar este trabajo? 🤔\n\n{_linea_trabajo(fila)}",
-        reply_markup=InlineKeyboardMarkup([[boton_si], [boton_no]]),
-    )
-
-
-@protegido
-async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fallback: cualquier comando que no esté en la lista (S1-4 espíritu)."""
-    comando = update.message.text.split()[0]
-    await update.message.reply_text(
-        f"No reconozco <code>{comando}</code> 🤔\n"
-        "Escribe <code>/ayuda</code> para ver los comandos."
+    usuario_solicita = update.effective_user.id
+    if not roles.es_admin(usuario_solicita) and fila["usuario_id"] != usuario_solicita:
+        # S5-4: cada mecánico solo puede borrar lo suyo
+        await responder(update, "🙅 Solo puedes borrar tus propios trabajos.")
+        return
+    botones = [
+        [
+            InlineKeyboardButton("🗑️ Sí, borrar", callback_data=f"borrar_si:{trabajo_id}"),
+            InlineKeyboardButton("❌ No", callback_data=f"borrar_no:{trabajo_id}"),
+        ]
+    ]
+    await responder(
+        update,
+        f"¿Borrar? {_linea_trabajo(fila)}",
+        reply_markup=InlineKeyboardMarkup(botones),
     )
 
 
 @protegido
 async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Acción al tocar los botones de /borrar."""
     query = update.callback_query
     accion, trabajo_id = query.data.split(":")
-
+    fila = db.trabajo_por_id(int(trabajo_id))
+    usuario_solicita = update.effective_user.id
+    puede = fila is not None and (
+        roles.es_admin(usuario_solicita) or fila["usuario_id"] == usuario_solicita
+    )
+    if not puede:
+        await query.answer("No tuyo 👀", show_alert=True)
+        return
     if accion == "borrar_si":
         anulado = db.anular_trabajo(int(trabajo_id))
-        if anulado:
-            await query.edit_message_text(f"🗑️ Trabajo #{trabajo_id} anulado.")
-        else:
-            await query.edit_message_text(
-                f"El trabajo #{trabajo_id} ya estaba anulado 🤷"
-            )
-        logger.info("Borrado trabajo #%s", trabajo_id)
-    else:
         await query.edit_message_text(
-            "😌 Listo, no quedó borrado nada."
+            f"🗑️ #{trabajo_id} anulado." if anulado else f"#{trabajo_id} ya estaba anulado 🤷",
         )
+        logger.info("Anulado #%s por %s", trabajo_id, usuario_solicita)
+    else:
+        await query.edit_message_text("😌 Quedó guardado.")
     await query.answer()
 
 
 @protegido
-async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Guarda un trabajo desde un mensaje normal (no comando)."""
-    texto = update.message.text
-    try:
-        resultado = parse(texto)
-    except ParserError as error:
-        await update.message.reply_text(
-            MENSAJES_DE_ERROR.get(error.motivo, MENSAJES_DE_ERROR[MOTIVO_VACIO]),
-            parse_mode="HTML",
-        )
-        return
+async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    comando = (update.message.text or "/?").split()[0]
+    await responder(
+        update, f"No reconozco <code>{comando}</code> 🤔\nPrueba /ayuda"
+    )
 
+
+@protegido
+async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guarda el trabajo firmado con quien lo registro (S5-2)."""
+    try:
+        resultado = parse(update.message.text)
+    except ParserError as error:
+        await responder(update, MENSAJES_DE_ERROR.get(error.motivo, "🤔"))
+        return
+    usuario_solicita = update.effective_user.id
+    firma = (
+        roles.nombre_de(usuario_solicita)
+        or update.effective_user.first_name  # si no está etiquetado en .env
+    )
     trabajo_id = db.agregar_trabajo(
         placa=resultado.placa,
         descripcion=resultado.descripcion,
         precio=resultado.precio,
         chat_id=update.effective_chat.id,
+        usuario_id=usuario_solicita,
+        mecanico=firma,
     )
-    await update.message.reply_text(
-        f"✅ <b>Trabajo #{trabajo_id} registrado</b>\n"
-        f"🛻️ Placa: <b>{resultado.placa}</b>\n"
-        f"🔧 Trabajo: {resultado.descripcion}\n"
-        f"💰 Valor: {formatear_dinero(resultado.precio)}\n"
-        f"🕒 {formatear_fecha(datetime.now())}"
+    await responder(
+        update,
+        f"✅ <b>#{trabajo_id}</b> · <b>{resultado.placa}</b>\n"
+        f"🔧 {resultado.descripcion}\n"
+        f"💰 {formatear_dinero(resultado.precio)}\n"
+        f"👤 {firma} · {formatear_fecha(datetime.now())}",
     )
-    logger.info(
-        "Trabajo #%s: %s %s %.0f", trabajo_id, resultado.placa, resultado.descripcion, resultado.precio
+    logger.info("Trabajo #%s: %s %s %.0f (por %s)",
+                trabajo_id, resultado.placa, resultado.descripcion,
+                resultado.precio, firma)
+
+
+@protegido
+async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """CSV con los trabajos del periodo. Solo el dueño (S5-5)."""
+    if not roles.es_admin(update.effective_user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer el dueño.")
+        return
+    arg = context.args[0].lower() if context.args else "mes"
+    dias = None
+    mes = True
+    if arg.isdigit() and 1 <= int(arg) <= 365:
+        dias, mes = int(arg), False
+    elif arg == "hoy":
+        dias, mes = None, False
+    elif arg != "mes":
+        await responder(update, "Periodo: <code>/exportar</code> (mes) · <code>/exportar 7</code> · <code>/exportar hoy</code>")
+        return
+    inicio, fin, etiqueta = db.rango_periodo(dias, mes)
+    filas = db._trabajos_entre(inicio, fin)
+    if not filas:
+        await responder(update, f"😌 Sin datos en {etiqueta}.")
+        return
+    buffer = io.StringIO()
+    escritor = csv.writer(buffer)
+    escritor.writerow(["id", "fecha", "hora", "placa", "trabajo", "precio", "mecanico"])
+    for fila in filas:
+        fecha_hora = datetime.fromisoformat(fila["fecha_hora"])
+        escritor.writerow([
+            fila["id"],
+            fecha_hora.strftime("%Y-%m-%d"),
+            fecha_hora.strftime("%H:%M"),
+            fila["placa"],
+            fila["descripcion"],
+            int(fila["precio"]),
+            fila["mecanico"] or roles.nombre_de(fila["usuario_id"]) or "sin firmar",
+        ])
+    contenido = b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")  # BOM p/ Excel
+    nombre_archivo = f"taller_{inicio}_a_{fin}.csv"
+    await update.message.reply_document(
+        document=contenido,  # bytes van directo en PTB 22+
+        filename=nombre_archivo,
+        caption=f"📄 {etiqueta} — {len(filas)} trabajos",
     )
 
 
 async def error_global(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Atrapa cualquier excepcion no manejada (ticket S3-2).
-
-    # Ningun handler puede tumbar el bot: siempre queda registrado el error
-    en logs y el usuario autorizado recibe un aviso amable en el chat.
-    """
-    logger.exception("Error no manejado en el bot", exc_info=context.error)
+    """Última línea de defensa: ningún handler tumba al bot (S3-2)."""
+    logger.exception("Error no manejado", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text(
-                "😅 Algo salió mal de mi lado, intenta de nuevo.\n"
-                "(el error quedó registrado en los logs)"
+                "😅 Algo salió mal de mi lado, intenta de nuevo."
             )
-        except Exception:  # ni el aviso va a tumbar al bot
-            logger.exception("Ni siquiera pude avisar del error en el chat")
+        except Exception:
+            logger.exception("No pude avisar el error en el chat")
 
 
 def main() -> None:
     if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
+        raise SystemExit("Falta el token en el .env (TELEGRAM_TOKEN).")
+    if not roles.ADMIN_IDS:
         raise SystemExit(
-            "Falta el token. Copia .env.example como .env y pega tu token de @BotFather."
+            "Define quién es dueño en .env:\n  ADMIN_IDS=9136002456"
         )
-    db.init_db()  # crea taller.db si no existe
+    logger.info(
+        "Roles: %s admin(s): %s, %s mecánico(s): %s",
+        len(roles.ADMIN_IDS), list(roles.ADMIN_IDS.values()),
+        len(roles.MECANICOS), list(roles.MECANICOS.values()) or "—",
+    )
+    db.init_db()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    # Comandos de consulta (Sprint 2)
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))
-    # Alias "ganancia" sin la s: para los dedos apurados del taller 😅
     app.add_handler(CommandHandler(["ganancias", "ganancia"], ganancias))
+    app.add_handler(CommandHandler("misganancias", misganancias))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("borrar", borrar))
-    # Botones de confirmacion del /borrar (S2-4)
+    app.add_handler(CommandHandler("exportar", exportar))
     app.add_handler(CallbackQueryHandler(confirmar_borrar, pattern=r"^borrar_(si|no):"))
-    # Cualquier otro comando desconocido (ej: /ganancia con otra falta):
-    # SIEMPRE responde algo, nunca silencio
+    # Cualquier otro comando → siempre responde algo (nunca silencio)
     app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
-    # Todo texto que no sea comando es un registro (ticket S1-3)
+    # Todo texto que no sea comando es un registro
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
-    # Ultima linea de defensa: errores inesperados (ticket S3-2)
+
     app.add_error_handler(error_global)
-
-    # Aviso de seguridad: la lista blanca no puede quedar vacia nunca
-    if not IDs_AUTORIZADOS:
-        logger.warning(
-            "AUTHORIZED_IDS vacio en .env: NADIE podra usar el bot. "
-            "Agrega tu ID (sabelo con @userinfobot)."
-        )
-        raise SystemExit(
-            "AUTHORIZED_IDS vacio en .env. Escribe a @userinfobot en Telegram "
-            "para saber tu ID y agregalo: AUTHORIZED_IDS=9136002456"
-        )
-
-    logger.info("Bot iniciado. Presiona Ctrl+C para detener.")
-    app.run_polling()  # long polling: sin dominio ni certificados
+    logger.info("Bot iniciado. Ctrl+C para detener.")
+    app.run_polling()
 
 
 if __name__ == "__main__":
