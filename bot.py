@@ -9,9 +9,15 @@ Comandos: /start, /ayuda, /historialdia, /ganancias, /buscar, /borrar.
 import logging
 import os
 from datetime import datetime
+from functools import wraps
+from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -30,24 +36,60 @@ from parser import (
     ParserError,
     parse,
 )
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import db
 
 # Carga las variables del archivo .env (token, ids autorizados, etc.)
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Configura los logs: latido de cada mensaje y errores visibles
+# Lista blanca: solo estos IDs de usuario de Telegram pueden usar el bot
+# (ticket S3-1). En .env van separados por coma: AUTHORIZED_IDS=11,22,33
+IDs_AUTORIZADOS: set[int] = {
+    int(id_texto)
+    for id_texto in os.getenv("AUTHORIZED_IDS", "").replace(",", " ").split()
+    if id_texto.strip()
+}
+
+
+def protegido(func):
+    """Decorador: solo deja pasar a los IDs de la lista blanca (S3-1)."""
+
+    @wraps(func)
+    async def envoltura(update, context, *args, **kwargs):
+        usuario = update.effective_user.id if update.effective_user else None
+        if usuario not in IDs_AUTORIZADOS:
+            logger.warning(
+                "Acceso denegado: id=%s nombre=%r mensaje=%r",
+                usuario,
+                update.effective_user.full_name if update.effective_user else "?",
+                update.effective_message.text if update.effective_message else "?",
+            )
+            return
+        return await func(update, context, *args, **kwargs)
+
+    return envoltura
+
+
+# Configura los logs: latido de cada mensaje y errores visibles.
+# Ademas van a archivo taller-bot.log (ticket S3-3), rotado a ~2 MB.
+FORMATO_LOG = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+manejador_consola = logging.StreamHandler()
+manejador_consola.setFormatter(logging.Formatter(FORMATO_LOG))
+manejador_archivo = RotatingFileHandler(
+    "taller-bot.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"
+)
+manejador_archivo.setFormatter(logging.Formatter(FORMATO_LOG))
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format=FORMATO_LOG,
     level=logging.INFO,
+    handlers=[manejador_consola, manejador_archivo],
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)  # silencia el ruido de red
 logger = logging.getLogger("taller-bot")
 
 # Respuestas cuando el parser no entiende el mensaje (ticket S1-4)
 MENSAJES_DE_ERROR = {
-    MOTIVO_VACIO: "Wrote something, I'm listening 👀",
+    MOTIVO_VACIO: "Escríbeme algo 👀",
     MOTIVO_PLACA: (
         "No encontré la placa 🤔\n"
         "Agregué la placa del vehículo al mensaje.\n"
@@ -82,6 +124,7 @@ def formatear_fecha(mensaje_dt: datetime) -> str:
     return mensaje_dt.strftime("%d/%m/%Y %I:%M %p").lower()
 
 
+@protegido
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Respuesta al comando /start."""
     await update.message.reply_text(
@@ -96,6 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("/start de %s", update.effective_user.username)
 
 
+@protegido
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Menú de comandos (ticket S2-5)."""
     await update.message.reply_text(
@@ -123,6 +167,7 @@ def _linea_trabajo(fila) -> str:
     )
 
 
+@protegido
 async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Lista los trabajos de hoy con total (ticket S2-1)."""
     filas = db.trabajos_hoy()
@@ -141,6 +186,7 @@ async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+@protegido
 async def ganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Suma del periodo (ticket S2-2): hoy por defecto, /ganancias 7 o /ganancias mes."""
     arg = context.args[0].lower() if context.args else ""
@@ -170,6 +216,7 @@ async def ganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@protegido
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Todo el historial de un vehículo (ticket S2-3)."""
     if not context.args:
@@ -194,6 +241,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@protegido
 async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Pide confirmación y anula un registro (ticket S2-4)."""
     if not context.args or not context.args[0].isdigit():
@@ -218,6 +266,7 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@protegido
 async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fallback: cualquier comando que no esté en la lista (S1-4 espíritu)."""
     comando = update.message.text.split()[0]
@@ -227,6 +276,7 @@ async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+@protegido
 async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Acción al tocar los botones de /borrar."""
     query = update.callback_query
@@ -248,6 +298,7 @@ async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
 
+@protegido
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Guarda un trabajo desde un mensaje normal (no comando)."""
     texto = update.message.text
@@ -278,6 +329,23 @@ async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def error_global(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Atrapa cualquier excepcion no manejada (ticket S3-2).
+
+    # Ningun handler puede tumbar el bot: siempre queda registrado el error
+    en logs y el usuario autorizado recibe un aviso amable en el chat.
+    """
+    logger.exception("Error no manejado en el bot", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "😅 Algo salió mal de mi lado, intenta de nuevo.\n"
+                "(el error quedó registrado en los logs)"
+            )
+        except Exception:  # ni el aviso va a tumbar al bot
+            logger.exception("Ni siquiera pude avisar del error en el chat")
+
+
 def main() -> None:
     if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
         raise SystemExit(
@@ -302,6 +370,19 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
     # Todo texto que no sea comando es un registro (ticket S1-3)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
+    # Ultima linea de defensa: errores inesperados (ticket S3-2)
+    app.add_error_handler(error_global)
+
+    # Aviso de seguridad: la lista blanca no puede quedar vacia nunca
+    if not IDs_AUTORIZADOS:
+        logger.warning(
+            "AUTHORIZED_IDS vacio en .env: NADIE podra usar el bot. "
+            "Agrega tu ID (sabelo con @userinfobot)."
+        )
+        raise SystemExit(
+            "AUTHORIZED_IDS vacio en .env. Escribe a @userinfobot en Telegram "
+            "para saber tu ID y agregalo: AUTHORIZED_IDS=9136002456"
+        )
 
     logger.info("Bot iniciado. Presiona Ctrl+C para detener.")
     app.run_polling()  # long polling: sin dominio ni certificados

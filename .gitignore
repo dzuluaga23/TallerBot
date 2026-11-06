@@ -9,3 +9,6 @@ __pycache__/
 # Base de datos local
 *.db
 backups/
+
+# Logs del bot
+*.log
