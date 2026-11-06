@@ -1,0 +1,11 @@
+# Entorno virtual y cachés
+venv/
+__pycache__/
+*.pyc
+
+# Secretos: NUNCA subir el token del bot
+.env
+
+# Base de datos local
+*.db
+backups/
