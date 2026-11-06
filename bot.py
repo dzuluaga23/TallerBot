@@ -218,6 +218,15 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fallback: cualquier comando que no esté en la lista (S1-4 espíritu)."""
+    comando = update.message.text.split()[0]
+    await update.message.reply_text(
+        f"No reconozco <code>{comando}</code> 🤔\n"
+        "Escribe <code>/ayuda</code> para ver los comandos."
+    )
+
+
 async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Acción al tocar los botones de /borrar."""
     query = update.callback_query
@@ -282,11 +291,15 @@ def main() -> None:
     # Comandos de consulta (Sprint 2)
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))
-    app.add_handler(CommandHandler("ganancias", ganancias))
+    # Alias "ganancia" sin la s: para los dedos apurados del taller 😅
+    app.add_handler(CommandHandler(["ganancias", "ganancia"], ganancias))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("borrar", borrar))
     # Botones de confirmacion del /borrar (S2-4)
     app.add_handler(CallbackQueryHandler(confirmar_borrar, pattern=r"^borrar_(si|no):"))
+    # Cualquier otro comando desconocido (ej: /ganancia con otra falta):
+    # SIEMPRE responde algo, nunca silencio
+    app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
     # Todo texto que no sea comando es un registro (ticket S1-3)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
 

@@ -46,13 +46,13 @@ MESES_ES = [
 
 
 def agregar_trabajo(placa: str, descripcion: str, precio: float, chat_id: int) -> int:
-    """Guarda un trabajo y devuelve el id asignado."""
+    """Guarda un trabajo y devuelve el id asignado. La placa se guarda en MAYUSCULAS."""
     ahora = datetime.now().isoformat()  # ej: 2026-11-06T14:05:32.123456
     with conectar() as conn:
         cursor = conn.execute(
             "INSERT INTO trabajos (fecha_hora, placa, descripcion, precio, chat_id) "
             "VALUES (?, ?, ?, ?, ?)",
-            (ahora, placa, descripcion, precio, chat_id),
+            (ahora, placa.strip().upper(), descripcion, precio, chat_id),
         )
         return cursor.lastrowid
 
@@ -77,6 +77,7 @@ def _trabajos_entre(inicio: str, fin: str) -> list[sqlite3.Row]:
 def _resumen_entre(inicio: str, fin: str) -> tuple[int, float]:
     """(cantidad, suma) de trabajos activos entre dos fechas ISO."""
     with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
         fila = conn.execute(
             "SELECT COUNT(*) AS cantidad, IFNULL(SUM(precio), 0) AS suma "
             "FROM trabajos WHERE anulado = 0 "
