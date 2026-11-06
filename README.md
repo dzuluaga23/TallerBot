@@ -84,6 +84,32 @@ TallerBot/
 
 `Telegram (long polling)` → `bot.py` decide por rol → `parser.py` valida el mensaje → `db.py` guarda/lee → `responder()` contesta con HTML enriquecido.
 
+## 🧰 Tecnologías utilizadas
+
+| Categoría | Tecnología | Para qué |
+|---|---|---|
+| Lenguaje | **Python 3.14** | Todo el proyecto |
+| Framework bot | **python-telegram-bot 22.8** | Conexión con Telegram (long polling, handlers, callbacks) |
+| Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
+| Configuración | **python-dotenv** | Variables secretas (token, roles) en `.env` |
+| Testing | **pytest** | 34 tests unitarios y de integración |
+| Control de versiones | **Git + GitHub** | Historial del código |
+| Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
+
+## 🧠 Ingeniería de software aplicada
+
+Decisiones y prácticas de este proyecto más allá del código:
+
+- **Separación de responsabilidades ([SoC](https://en.wikipedia.org/wiki/Separation_of_concerns)):** cada módulo hace una sola cosa (parser ≠ base de datos ≠ roles ≠ respuestas). Cambiar el formato de los mensajes NO toca SQL.
+- **Control de acceso en profundidad (defensa en capas):** primero el decorador `protegido` (lista blanca en `roles.py`), después reglas por rol dentro de cada comando, y `/borrar` re-verifica contra la BD en el callback. Tres capas, no una.
+- **Borrado lógico (soft delete):** ningún registro se destruye; `/borrar` solo marca `anulado=1`. Trazabilidad para auditorías y errores humanos.
+- **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas nuevas con `ALTER TABLE` silencioso si ya existen. La BD vieja del Sprint 1 vive sin romper.
+- **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancia` sin `s`) tienen alias y un fallback.
+- **Configuración fuera del código (12-factor "config"):** roles y secretos en `.env`, no constantes quemadas. Cambiar el dueño o agregar un mecánico no toca una línea de código ni requiere redeploy.
+- **Un solo canal de respuestas:** toda salida pasa por `responder()` con `parse_mode="HTML"` — imposible que un mensaje nuevo repita el bug del `<b>` literal.
+- **Testing primero donde importa:** el parser (la parte que usan manos ocupadas) y las reglas de visibilidad por rol tienen cobertura de tests; la BD se prueba con archivos temporales `tmp_path` para no tocar datos reales.
+- **Git con disciplina:** commits por sprint con tickets (S5-2, S5-3…), `.gitignore` excluyendo secretos (`.env`) y datos (`*.db`, `*.log`).
+
 ## 📖 Sprints del proyecto
 
 0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 4. ⬜ Nube gratuita (despliegue 24/7)
