@@ -48,6 +48,24 @@ from parser import (
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# Códigos de venta (Sprint 8): CATÁLOGO en el .env, ESTADO de uso en la BD.
+# Cada código permite crear UN solo taller. Sepáralos por coma en el .env.
+CODIGOS_TALLER: set[str] = {
+    trozo.strip().upper()
+    for trozo in os.getenv("CODIGOS_TALLER", "").split(",")
+    if trozo.strip()
+}
+
+
+def _estado_codigo(codigo: str) -> str:
+    """'ok' | 'invalido' | 'usado' — lógica de venta separada para poder probarla."""
+    codigo = (codigo or "").strip().upper()
+    if codigo not in CODIGOS_TALLER:
+        return "invalido"
+    if db.codigo_ya_redimido(codigo):
+        return "usado"
+    return "ok"
+
 # ── Logs: consola + archivo rotativo ────────────────────────────────────
 FORMATO_LOG = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 manejador_consola = logging.StreamHandler()
@@ -131,9 +149,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if perfil_usuario is None:
         await responder(
             update,
-            "👋 Hola! Este bot es para talleres que ya están conectados.\n\n"
-            "Si tu dueño te invitó, haz el link que te mandó.\n"
-            "Si quieres montar TU taller: <code>/nuevotaller</code>",
+            "👋 Hola! Este bot es para talleres registrados.\n\n"
+            "Si te invitaron a un taller, usa el link que te mandó tu dueño.\n"
+            "Si quieres montar TU taller, necesitas un código del desarrollador:\n"
+            "<code>/nuevotaller CODIGO NombreDelTaller</code>",
         )
         return
     nombre_taller = db.obtener_taller(perfil_usuario["taller_id"])["nombre"]
@@ -185,7 +204,7 @@ async def _procesar_link_invitacion(
 
 
 async def nuevotaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/nuevotaller [nombre] — el creador queda como dueno. Público con guardia."""
+    """/nuevotaller CODIGO [nombre] — crea el taller SOLO con código de venta (S8)."""
     user = update.effective_user
     perfil_usuario = roles.perfil(user.id)
     if perfil_usuario is not None:
@@ -196,9 +215,40 @@ async def nuevotaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Si quieres otro taller, primero el dueño de ese te tiene que desvincular.",
         )
         return
-    nombre = " ".join(context.args).strip() or f"Taller {user.first_name}"
+    if not context.args:
+        await responder(
+            update,
+            "🔒 Para usar el bot necesitas un <b>código de acceso</b> que te da el "
+            "desarrollador del bot:\n\n"
+            "<code>/nuevotaller CODIGO NombreDelTaller</code>\n\n"
+            "Ejemplo: <code>/nuevotaller VENTA-PEDRO-2026 Taller Pedro Motores</code>",
+        )
+        return
+    codigo = context.args[0].strip().upper()
+    estado = _estado_codigo(codigo)
+    if estado == "invalido":
+        logger.warning("Código inválido: %r intento de %s", codigo, user.id)
+        await responder(
+            update,
+            "❌ Ese código no es válido.\n"
+            "Pídeselo al desarrollador del bot (es una palabra tipo "
+            "VENTA-NOMBRE-2026) y vuelve a intentar.",
+        )
+        return
+    if estado == "usado":
+        await responder(
+            update,
+            "🚫 Ese código ya fue utilizado (son de un solo uso). "
+            "Pide otro al desarrollador.",
+        )
+        return
+    nombre = " ".join(context.args[1:]).strip() or f"Taller {user.first_name}"
     taller_id = db.crear_taller(nombre, user.id, user.full_name or user.first_name)
-    logger.info("Taller #%s '%s' creado por %s", taller_id, nombre, user.id)
+    redimido = db.redimir_codigo(codigo, taller_id, user.id)
+    if not redimido:  # carrera rara: alguien lo quemó a la vez
+        logger.warning("Código %s se quemó de lado al crear taller %s", codigo, taller_id)
+    logger.info("Taller #%s '%s' creado por %s (código %s)",
+                taller_id, nombre, user.id, codigo)
     await responder(
         update,
         f"🎉 <b>{nombre}</b> listo y ERES su dueño!\n\n"

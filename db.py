@@ -85,6 +85,16 @@ def init_db(duenos_antiguos: dict[int, str] | None = None) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS codigos_usados (
+                codigo    TEXT PRIMARY KEY,       -- codigo de venta: un solo uso
+                taller_id INTEGER NOT NULL,
+                user_id   INTEGER NOT NULL,       -- quien lo redimio
+                fecha     TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS trabajos (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 fecha_hora  TEXT    NOT NULL,
@@ -306,6 +316,27 @@ def revocar_invitacion(codigo: str, taller_id: int) -> bool:
         cursor = conn.execute(
             "UPDATE invitaciones SET activa = 0 WHERE codigo = ? AND taller_id = ?",
             (codigo, taller_id),
+        )
+        return cursor.rowcount == 1
+
+
+# ------------------- Codigos de venta (Sprint 8) -------------------
+
+
+def codigo_ya_redimido(codigo: str) -> bool:
+    with conectar() as conn:
+        return conn.execute(
+            "SELECT 1 FROM codigos_usados WHERE codigo = ?", (codigo,)
+        ).fetchone() is not None
+
+
+def redimir_codigo(codigo: str, taller_id: int, user_id: int) -> bool:
+    """Quema el codigo ATOMICAMENTE. False si alguien ya lo consumio."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO codigos_usados (codigo, taller_id, user_id, fecha) "
+            "VALUES (?, ?, ?, ?)",
+            (codigo, taller_id, user_id, datetime.now().isoformat()),
         )
         return cursor.rowcount == 1
 

@@ -16,8 +16,9 @@ venv\Scripts\python -m pip install -r requirements.txt
 venv\Scripts\python bot.py
 
 # 4. Dentro de Telegram:
-#    /nuevotaller NombreDelTaller  -> te hace dueño de tu taller
-#    /invitar mecanico             -> link para el staff
+#    /nuevotaller CODIGO NombreDelTaller  -> requiere un código de venta
+#    (el desarrollador lo pone en CODIGOS_TALLER del .env)
+#    /invitar mecanico                    -> link para el staff
 
 # 5. Probar la construcción
 venv\Scripts\python -m pytest tests -v
@@ -27,7 +28,7 @@ venv\Scripts\python -m pytest tests -v
 
 | Comando | Qué hace |
 |---|---|
-| `/nuevotaller Mi Taller` | Crea el taller; quien lo crea queda como dueño |
+| `/nuevotaller CODIGO Mi Taller` | Crea el taller y el creador queda como dueño. **Requiere un código de venta de un solo uso** (lo emite el desarrollador en el `.env`) |
 | `/invitar mecanico` · `/invitar dueno` | Genera un link de invitación `https://t.me/BOT?start=CODIGO` |
 | *(candidato abre el link)* | Toca "🤝 Solicitar unirme" → **la solicitud le llega al dueño con botones ✅/❌** |
 | `/personal` | Lista el staff con sus IDs |
@@ -65,10 +66,23 @@ ABC123 cambio de aceite 45000
 ## ⚙️ Configuración (`.env`)
 
 ```ini
-TELEGRAM_TOKEN=...   # de @BotFather. Es TODO lo que va en el .env del Sprint 6 en adelante
+TELEGRAM_TOKEN=...            # de @BotFather
+CODIGOS_TALLER=VENTA-PEDRO-2026-A1,VENTA-MARIA-0002   # códigos de venta (S8)
 ```
 
 Los roles **no** se configuran aquí desde el Sprint 6: se gestionan desde el bot con `/nuevotaller`, `/invitar`, `/personal`, `/rol` y `/expulsar` (la BD es la fuente de verdad). `ADMIN_IDS`/`MECHANICS` solo se leen una vez para migrar instalaciones anteriores a la BD.
+
+## 💰 Modalidad comercial (códigos de venta, Sprint 8)
+
+Nadie puede crear un taller gratis: **se necesita un código que emite el desarrollador**.
+
+1. Vendes el bot → editas el `.env` y agregas un código nuevo a `CODIGOS_TALLER` → reinicias.
+2. Le pasas el código al comprador junto con el link del bot.
+3. El comprador manda: `/nuevotaller VENTA-PEDRO-2026-A1 Taller Pedro Motores` → queda como dueño de su taller.
+4. **El código se quema al usarse**: la marca de "ya redimido" vive en la BD (`codigos_usados`: código, taller, quién, cuándo) — sobrevive a reinicios y no es inventable reenviando el link.
+5. Los mecánicos/dueños adicionales NO necesitan código: el dueño de cada taller ya los invita con los links normales.
+
+Es decir: como desarrollador, tu operación de venta entera es "agregar una palabra al `.env`". Catalogo en `.env`, estado de uso en la BD.
 
 ## 🗄️ Base de datos — `taller.db` (SQLite, un solo archivo)
 
@@ -79,6 +93,7 @@ erDiagram
     TALLERES ||--o{ INVITACIONES : "emite"
     USUARIOS   ||--o{ TRABAJOS  : "firma"
     INVITACIONES ||--o{ SOLICITUDES : "recibe"
+    CODIGOS_USADOS ||--|| TALLERES : "fue quemado por"
 
     TALLERES {
         int id
@@ -101,6 +116,12 @@ erDiagram
         text rol "rol propuesto"
         int creada_por "dueno que genero"
         int activa "0 = revocado"
+    }
+    CODIGOS_USADOS {
+        text codigo "codigo de venta"
+        int taller_id "taller creado"
+        int user_id "quien redimio"
+        text fecha "ISO local"
     }
     SOLICITUDES {
         int id
@@ -134,7 +155,7 @@ TallerBot/
 ├── parser.py    # interpreta mensajes de registro (placa/trabajo/precio)
 ├── db.py        # SQLite: talleres, usuarios, invitaciones, trabajos
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
-├── tests/       # 47 tests (parser, BD, aislamiento, acceso, factura, formatos)
+├── tests/       # 53 tests (parser, BD, aislamiento, acceso, factura, códigos, formatos)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
 ├── .env         # token (NUNCA subir a GitHub)
@@ -154,7 +175,7 @@ TallerBot/
 | Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
 | PDF | **fpdf2 2.9** | Facturas simples con logo y datos del taller |
 | Configuración | **python-dotenv** | Token en `.env` |
-| Testing | **pytest** | 47 tests unitarios y de integración |
+| Testing | **pytest** | 53 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
 
@@ -165,6 +186,7 @@ Decisiones y prácticas de este proyecto más allá del código:
 - **Separación de responsabilidades ([SoC](https://en.wikipedia.org/wiki/Separation_of_concerns)):** cada módulo hace una sola cosa (parser ≠ base de datos ≠ roles ≠ facturas ≠ respuestas). Cambiar el formato de los mensajes NO toca SQL, y el PDF se puede probar sin Telegram.
 - **Control de acceso en profundidad (defensa en capas):** primero el decorador `protegido` (perfil del usuario en la BD), después reglas por rol dentro de cada comando, y los callbacks (`/borrar`, invitaciones) re-verifican contra la BD. Tres capas, no una.
 - **Aislamiento de datos multi-tenant:** TODAS las consultas de trabajos llevan `taller_id`; hay tests que garantizan que un taller jamás vea datos de otro.
+- **Códigos de venta = catálogo ≠ estado (S8):** el catálogo de códigos vive en el `.env` (solo editable por el desarrollador) pero el registro de "cuál ya se usó" vive en la BD con redención Atómica (`INSERT OR IGNORE`). Un código es de un solo uso aunque salte reinicios del servidor.
 - **Borrado lógico (soft delete):** ningún registro ni usuario se destruye; `/borrar` marca `anulado=1` y `/expulsar` marca `activo=0`. Trazabilidad para auditorías y errores humanos.
 - **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas con `ALTER TABLE` silencioso, pero SEGMENTADO POR TABLA (lección aprendida: una migración mal enfocada corrompe el esquema).
 - **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancias` sin `s`) tienen alias y un fallback.
@@ -175,4 +197,4 @@ Decisiones y prácticas de este proyecto más allá del código:
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 4. ⬜ Nube gratuita (despliegue 24/7)
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ⬜ Nube gratuita (despliegue 24/7)
