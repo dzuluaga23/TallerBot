@@ -13,8 +13,10 @@ import csv
 import io
 import logging
 import os
+import threading
 from datetime import datetime
 from functools import wraps
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
@@ -34,6 +36,7 @@ from telegram.ext import (
 
 import db
 import factura
+import respaldo
 import roles
 from parser import (
     MOTIVO_DESCRIPCION,
@@ -80,6 +83,29 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("taller-bot")
+
+# ── Cloud (Sprint 4 - Render) ───────────────────────────────────────────
+# Render free: el servicio debe responder HTTP en su $PORT (si no, lo mata).
+class _Salud(BaseHTTPRequestHandler):
+    """GET /salud -> 200. Solo existe si la nube define PORT (local: nada)."""
+
+    def do_GET(self) -> None:  # noqa: N802 (codigo del stdlib, no cambiar)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"tallerbot vivo")
+
+    def log_message(self, *args) -> None:  # silencio: no embotella el log real
+        pass
+
+
+def _levantar_servidor_salud() -> None:
+    puerto = int(os.getenv("PORT", "0"))
+    if not puerto:
+        return  # PC local / VM: no nube, no servidor de salud
+    servidor = HTTPServer(("0.0.0.0", puerto), _Salud)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    logger.info("Servidor de salud en puerto %s (Render)", puerto)
 
 EJEMPLO = "<code>ABC123 cambio de aceite 45000</code>"
 MENSAJES_DE_ERROR = {
@@ -960,6 +986,15 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
 
     app.add_error_handler(error_global)
+
+    _levantar_servidor_salud()
+    if respaldo.disponible():
+        restaurado = respaldo.restaurar_si_hace_falta()
+        threading.Thread(target=respaldo.bucle, daemon=True).start()
+        logger.info(
+            "Respaldos a GitHub activos (cada %s min%s)",
+            respaldo.minutos(), ", BD restaurada" if restaurado else "",
+        )
     logger.info("Bot iniciado. Ctrl+C para detener.")
     app.run_polling()
 

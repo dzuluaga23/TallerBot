@@ -1,125 +1,89 @@
-# 🚀 DEPLOY — TallerBot en Oracle Always Free (24/7, $0)
+# 🚀 DEPLOY — TallerBot en Render (24/7, $0)
 
-Guía para dejar el bot corriendo **siempre** en una VM gratuita de Oracle Cloud.
-No hay nada que abrir al mundo: el bot usa *long polling* (solo sale a Telegram), así que el
-firewall queda con únicamente SSH abierto. La BD (`taller.db`) vive en el disco de la VM:
-**no se pierde en reinicios**.
+Guía para dejar el bot corriendo siempre en la nube gratis con [Render](https://render.com).
+El bot usa *long polling*: no abre nada al mundo; Render solo le pide responder HTTP en su
+puerto interno (y eso ya lo hace el bot con su endpoint `/salud`).
 
----
+## ⚠️ La regla de Render free (y cómo la resolvimos)
+
+| Limitación | Cómo la resolvimos |
+|---|---|
+| Sin disco persistente: en cada restart/se borra `taller.db` | `respaldo.py` sube la BD a un **repo privado de GitHub** cada 10 min y la **restaura al arrancar** si falta |
+| Duerme tras ~15 min sin tráfico | Un pinger externo gratuito (cron-job.org) le pega a la URL cada 10 min |
+
+Ventana de pérdida teórica: si el proceso muriera en medio de un intervalo, se pierde lo
+registrado desde el último respaldo (máximo ~10 min). En una VM con disco (Oracle) el precio
+es cero: si algún día un taller te exige cero pérdida, la migración es solo copiar el mismo
+`taller.db` a otra infraestructura — nada del código cambia.
 
 ## 0. Pre-requisito: subir el código a GitHub
-
-Oracle solo importa el código desde GitHub. Si tienes commits locales pendientes:
 
 ```bash
 git push origin main
 ```
 
----
+## 1. Crea el repo de respaldo y su token
 
-## 1. Crear la cuenta y la VM en Oracle Cloud
+1. En GitHub: **New repository** → nombre `respaldo-taller` → **Private**.
+2. Crea un token: GitHub → Settings → Developer settings → **Fine-grained token**:
+   - **Repository access**: solo `respaldo-taller`
+   - **Permissions**: Contents → **Read and write**
+   - Copia el token (`github_pat_...`) — solo se ve una vez.
 
-1. Entra a [cloud.oracle.com](https://cloud.oracle.com) y crea una cuenta **Free Tier**
-   (pide tarjeta solo para verificar identidad; no cobra en el plan Always Free).
-2. Elige una **región** cercana (Colombia: `us-ashburn-1` o `sa-saopaulo-1`).
-3. Menú ☰ → **Compute → Instances → Create Instance**:
-   - **Name**: `tallerbot`
-   - **Image**: `Canonical Ubuntu 22.04` (o 24.04)
-   - **Shape**: `VM.Standard.A1.Flex` (Ampere ARM) → 2 OCPU / 12 GB RAM *(Always Free: hasta 4 OCPU / 24 GB en total)*
-   - **SSH keys**: pega tu clave pública o deja que Oracle te descargue la privada (`.key`)
-4. **Create**. En ~1 minuto la instancia queda `RUNNING` — copia su **IP pública**.
+## 2. Crea el Web Service en Render
 
-> ⚠️ Si el shape sale "out of capacity" en tu región, prueba shape `VM.Standard.E2.1.Micro` (1 GB RAM, también Always Free; el setup.sh le crea swap automáticamente).
+1. [dashboard.render.com](https://dashboard.render.com) → **New + → Web Service**.
+2. Conecta tu GitHub y elige el repo `TallerBot`.
+3. Con `render.yaml` incluido, casi todo viene lleno, pero confirma:
+   - **Runtime**: Python 3 · **Build**: `pip install -r requirements.txt`
+   - **Start**: `python bot.py` · **Plan**: Free
+4. **Environment Variables** (Render rellena las de `sync: false`):
 
----
+| Key | Valor |
+|---|---|
+| `TELEGRAM_TOKEN` | tu token de @BotFather |
+| `CODIGOS_TALLER` | `VENTA-...` (los códigos de venta, separados por coma) |
+| `GITHUB_RES_REPO` | `dzuluaga23/respaldo-taller` |
+| `GITHUB_TOKEN` | el token del paso 1 |
+| `RESPALDO_MINUTOS` | `10` |
 
-## 2. Conectar y subir el código
+5. **Create Web Service**. En el Logs verás el arranque: "Servidor de salud ... (Render)",
+   "Respaldos a GitHub activos" y "Bot iniciado".
 
-```bash
-# Desde tu PC (PowerShell) — conectar por SSH:
-ssh -i ruta_de_tu_clave ubuntu@IP_PUBLICA
+## 3. Migrar la BD que ya tienes (Taller Prueba)
 
-# Copia del repo (si es privado, mete tu token de GitHub en la URL):
-sudo git clone https://TU_TOKEN@github.com/dzuluaga23/TallerBot.git /opt/tallerbot
-sudo chown -R ubuntu:ubuntu /opt/tallerbot
-```
+En Render la BD nace vacía y se restaurará del repo de respaldo. Para llevar tus datos:
 
-**¿Tenías datos en tu PC?** Migra la BD y los logos ANTES de correr setup.sh:
+1. Entra a `respaldo-taller` en GitHub → **Add file → Upload files**.
+2. En el campo de nombre escribe la ruta completa: `respaldo/taller.db` (GitHub crea la carpeta).
+   Sube TU `taller.db` local ahí. Commit.
+3. Reinicia el servicio (Manual Deploy → Restart) — al arrancar la baja y lista,
+   con talleres, usuarios y trabajos intactos.
 
-```bash
-# En tu PC (PowerShell), con la IP de la VM:
-scp taller.db logos/*.jpg ubuntu@IP_PUBLICA:/home/ubuntu/
-# De vuelta en la VM:
-sudo mv /home/ubuntu/taller.db /home/ubuntu/*.jpg /opt/tallerbot/
-# (los logos se renombran así: mv /opt/tallerbot/taller_N.jpg /opt/tallerbot/logos/taller_N.jpg
-#  si la carpeta logos/ no existe: sudo mkdir /opt/tallerbot/logos)
-```
+> Logos: al no ser parte de la BD se pierden en un restart — re-súbelos una vez desde
+> Telegram con `/logo` (menos de un minuto) y listo.
 
----
+## 4. Que no se duerma (pinger externo)
 
-## 3. Setup automático (todo lo demás)
-
-```bash
-cd /opt/tallerbot
-sudo bash deploy/setup.sh
-```
-
-El script instala Python/venv/sqlite3, crea el usuario del servicio, el servidor de swap si hace
-falta, el firewall (solo SSH), el servicio systemd y el cron de backup diario.
-
-## 4. El `.env` en el servidor
-
-Con tus datos de verdad (el token del mismo bot, tus códigos de venta):
-
-```bash
-sudo nano /opt/tallerbot/.env      # pegar:
-# TELEGRAM_TOKEN=...
-# CODIGOS_TALLER=VENTA-...
-sudo chmod 600 /opt/tallerbot/.env
-sudo systemctl restart tallerbot
-```
+1. Crea una cuenta en [cron-job.org](https://cron-job.org) → **Cronjobs → Create**:
+   - **URL**: `https://tallerbot.onrender.com/salud` (tu URL de Render + `/salud`)
+   - **Every 10 minutes**
+2. Actívalo. Listo: Render ve tráfico y el servicio no duerme nunca.
 
 ## 5. Verificar y operar
 
-```bash
-systemctl status tallerbot      # debe decir active (running)
-journalctl -u tallerbot -f      # logs en vivo (Ctrl+C para salir)
-```
-
-Y en Telegram: pídele al bot `/ayuda`. Responde = está vivo.
-
-| Tarea | Comando |
+| Qué revisar | Dónde |
 |---|---|
-| Reiniciar | `sudo systemctl restart tallerbot` |
-| Ver errores | `journalctl -u tallerbot --since "1 hour ago"` |
-| Actualizar código | `cd /opt/tallerbot && sudo -u ubuntu git pull && sudo chown -R tallerbot:tallerbot . && sudo systemctl restart tallerbot` |
-| Backup a mano | `sudo /usr/local/bin/tallerbot-backup` |
-| Restaurar backup | `sudo systemctl stop tallerbot && sudo cp /var/backups/tallerbot/taller-FECHA.db /opt/tallerbot/taller.db && sudo systemctl start tallerbot` |
+| Logs en vivo | Dashboard → Events/Logs |
+| Endpoint vivo | `https://tallerbot.onrender.com/salud` → `tallerbot vivo` |
+| Respaldo más reciente | Repo `respaldo-taller`, commits cada ~10 min |
+| Bot vivo | Telegram: `/ayuda` |
 
-El **backup automático** corre todos los días a las 03:15 (14 copias rotativas en
-`/var/backups/tallerbot/`). La BD también sigue viva en su disco normal; los backups son
-seguro ante corrupción o error humano.
+**Apagar el bot de tu PC**: solo un proceso puede usar el token — si la nube toma turno,
+deja de correr `bot.py` localmente (o da error de conflicto de Telegram).
 
----
+## 6. Pilotaje de 48 h
 
-## 6. Apagar el bot local
-
-Solo puede haber un proceso con el token: deja de correr `venv\Scripts\python bot.py` en tu PC
-(si lo tienes en "autoinicio", saca esa tarea). La PC agendada ahora es redundante.
-
-## 7. Pilotaje de 48 h
-
-- ✅ Día 1: mandar `/ayuda`, registrar un trabajo de prueba, verificar en la BD desde la VM con `sqlite3 /opt/tallerbot/taller.db "SELECT COUNT(*) FROM trabajos;"`
-- ✅ Día 2: `uptime 14` en la VM, `systemctl status tallerbot` (que no haya restarts raros), y `/factura` de una placa real para ver el PDF generado en la nube.
-- ✅ Después: apaga tu PC una noche entera — el bot debe contestar igual.
-
----
-
-## Cómo se paga esto 💰
-
-Plan **Always Free**: la VM Ampere (2 OCPU / 12 GB) y su disco de boot entran en el cupo gratis
-**permanente** (no es prueba de 30 días). Cuidados:
-
-- NO subas el shape a formas de pago por accidente (el panel te lo propone).
-- Si un día Oracle te manda mail "reclaim of idle instances", es para VM micro (E2.1) —
-  la Ampere con CPU usada por el bot no cae en esa regla.
+- ✅ Día 1: registra un trabajo de prueba desde Telegram, confirma que a los ~10 min aparece un commit nuevo en `respaldo-taller`.
+- ✅ Día 2: Manual Deploy → **Restart** y comprueba que la BD sobrevivió (los datos de ayer siguen ahí).
+- ✅ Apaga tu PC una noche entera — el bot debe contestar igual.

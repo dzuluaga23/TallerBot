@@ -195,9 +195,11 @@ TallerBot/
 ├── factura.py   # genera el PDF de facturas (probable sin Telegram)
 ├── parser.py    # interpreta mensajes de registro (placa/trabajo/precio)
 ├── db.py        # SQLite: talleres, usuarios, invitaciones, trabajos
+├── respaldo.py  # respaldo/restauracion de la BD en GitHub (nube)
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
-├── deploy/      # VM 24/7: setup Ubuntu + systemd + backup diario (mira DEPLOY.md)
-├── tests/       # 53 tests (parser, BD, aislamiento, acceso, factura, códigos, formatos)
+├── render.yaml   # blueprint de deployment en Render (mira DEPLOY.md)
+├── respaldo.py   # BD <-> repo privado de GitHub (Render free no tiene disco)
+├── tests/       # 63 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
 ├── .env         # token (NUNCA subir a GitHub)
@@ -208,15 +210,23 @@ TallerBot/
 
 `Telegram (long polling)` → `bot.py` valida el perfil (BD) y decide por rol → `parser.py` valida el mensaje → `db.py` guarda/lee (SIEMPRE filtrado por `taller_id`) → `responder()` contesta con HTML enriquecido → para facturas, `factura.py` arma el PDF y se envía como documento.
 
-## ☁️ Despliegue 24/7 (Oracle Always Free)
+## ☁️ Despliegue 24/7 (Render free, $0)
 
-El bot corre gratis y siempre encendido en una VM Ubuntu de Oracle Cloud con:
-**systemd** (reinicio automático si el proceso cae), firewall con solo SSH abierto
-(el bot usa long polling: no necesita puertos) y **backup diario** de la BD
-(14 copias rotativas). Guía completa paso a paso en **[DEPLOY.md](DEPLOY.md)**.
+El bot corre gratis y siempre encendido en Render, con dos parches de ingeniería para las
+limitaciones del plan free:
+
+- **La BD se respalda sola en un repo privado de GitHub** (`respaldo.py`): sube `taller.db`
+  vía API cada `RESPALDO_MINUTOS` (10 por defecto) y la restaura al arrancar si falta.
+  Fail-safe total: si falta el token o la red cae, el bot sigue andando.
+- **Servidor de salud integrado**: si la nube define `PORT`, el bot abre un mini-HTTP con
+  `/salud` en un hilo aparte (en tu PC no cambia nada).
+- **Pinger externo** (cron-job.org) despierta/consulta `/salud` cada 10 min → nunca duerme.
+
+Guía completa paso a paso (repo de respaldo, token, variables, migrar tu BD y pilotaje de 48 h)
+en **[DEPLOY.md](DEPLOY.md)**.
 
 💡 Un solo detalle operativo: solo un proceso puede usar el token de Telegram a la vez.
-O sea, cuando la VM tome el turno, **apaga el bot de tu PC** (o habrá conflicto).
+O sea, cuando Render tome el turno, **apaga el bot de tu PC** (o habrá conflicto).
 
 ## 🧰 Tecnologías utilizadas
 
@@ -227,9 +237,9 @@ O sea, cuando la VM tome el turno, **apaga el bot de tu PC** (o habrá conflicto
 | Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
 | PDF | **fpdf2 2.9** | Facturas simples con logo y datos del taller |
 | Configuración | **python-dotenv** | Token en `.env` |
-| Testing | **pytest** | 53 tests unitarios y de integración |
+| Testing | **pytest** | 63 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
-| Infraestructura | **Oracle Always Free + systemd** | VM Ubuntu 24/7 con reinicio automático y firewall mínimo |
+| Infraestructura | **Render (plano free) + cron-job.org** | Hosting 24/7 respaldado con la API de contenidos de GitHub |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
 
 ## 🧠 Ingeniería de software aplicada
@@ -250,4 +260,4 @@ Decisiones y prácticas de este proyecto más allá del código:
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. 🚧 Nube gratuita (Oracle Always Free) — código de despliegue listo, falta lanzar la VM (guía en [DEPLOY.md](DEPLOY.md))
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. 🚧 Nube gratuita (Render free) — código de despliegue listo, falta crear los servicios (guía en [DEPLOY.md](DEPLOY.md))

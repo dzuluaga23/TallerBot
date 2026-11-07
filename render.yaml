@@ -1,0 +1,23 @@
+# Render Blueprint del TallerBot.
+# Con este archivo, en el dashboard: New + -> Blueprint -> elige el repo -> Apply.
+# (los secretos TELEGRAM_TOKEN/CODIGOS_TALLER/GITHUB_* se piden al crear, sync: false)
+services:
+  - type: web
+    name: tallerbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /salud
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CODIGOS_TALLER
+        sync: false
+      - key: GITHUB_RES_REPO
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: RESPALDO_MINUTOS
+        value: "10"
