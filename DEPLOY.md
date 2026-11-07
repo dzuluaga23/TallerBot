@@ -46,6 +46,7 @@ git push origin main
 | `GITHUB_RES_REPO` | `dzuluaga23/respaldo-taller` |
 | `GITHUB_TOKEN` | el token del paso 1 |
 | `RESPALDO_MINUTOS` | `10` |
+| `TZ` | `America/Bogota` (hora del taller: sin eso "hoy"/"mes" corren en UTC y los reportes salen corridos) |
 
 5. **Create Web Service**. En el Logs verás el arranque: "Servidor de salud ... (Render)",
    "Respaldos a GitHub activos" y "Bot iniciado".
