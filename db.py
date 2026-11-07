@@ -1,11 +1,14 @@
 """Base de datos del taller (SQLite).
 
-Un solo archivo: taller.db. Se crea automaticamente al iniciar el bot.
-
-Esquema: cada trabajo queda FIRMADO con el usuario de Telegram que lo
-registro (usuario_id + mecanico). Sprint 5: consultas filtradas por rol
-(los mecanicos solo ven lo suyo; el dueno ve todo y desgloses).
+Sprint 6 - MULTI-TENANT: varios talleres, cada uno con sus usuarios.
+- talleres:    cada taller registrado (/nuevotaller)
+- usuarios:    quien pertenece a que taller y con que rol (dueno/mecanico)
+- invitaciones: codigos para links tipo https://t.me/BOT?start=CODIGO
+- solicitudes: la peticion "quiero unirme" que el dueno acepta o rechaza
+- trabajos:    1 fila por trabajo registrado. SIEMPRE lleva taller_id y
+               queda firmada con usuario_id/mecanico.
 """
+import secrets
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +20,9 @@ MESES_ES = [
     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
 ]
 
+ROL_DUENO = "dueno"
+ROL_MECANICO = "mecanico"
+
 _ROW_FACTORY = sqlite3.Row
 
 
@@ -24,34 +30,280 @@ def conectar() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
-def init_db() -> None:
-    """Crea/actualiza las tablas. Se llama al arrancar el bot."""
+def init_db(duenos_antiguos: dict[int, str] | None = None) -> None:
+    """
+    Crea/actualiza las tablas y SI hace migracion desde el modelo viejo:
+    si existian trabajos sin taller, se agrupan automaticamente en el
+    taller 'Taller Prueba' y los duenos antiguos del .env quedan como tal.
+    """
     with conectar() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS talleres (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                creado TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usuarios (
+                user_id   INTEGER PRIMARY KEY,       -- 1 usuario = 1 taller
+                taller_id INTEGER NOT NULL,
+                nombre    TEXT NOT NULL,
+                rol       TEXT NOT NULL,             -- 'dueno' | 'mecanico'
+                activo    INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS invitaciones (
+                codigo     TEXT PRIMARY KEY,
+                taller_id  INTEGER NOT NULL,
+                rol        TEXT NOT NULL,
+                creada_por INTEGER NOT NULL,           -- dueno que genero el link
+                activa     INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS solicitudes (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo  TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                nombre  TEXT NOT NULL,
+                estado  TEXT NOT NULL DEFAULT 'pendiente'   -- pendiente/aceptada/rechazada
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trabajos (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha_hora  TEXT    NOT NULL,       -- fecha y hora ISO del registro
-                placa       TEXT    NOT NULL,       -- ej: ABC123, ABC12D
-                descripcion TEXT    NOT NULL,       -- trabajo realizado
-                precio      REAL    NOT NULL,       -- valor cobrado
-                chat_id     INTEGER NOT NULL,       -- chat de Telegram del registro
-                anulado     INTEGER NOT NULL DEFAULT 0,  -- 1 = borrado logico
-                usuario_id  INTEGER,                -- Telegram de quien registro (Sprint 5)
-                mecanico    TEXT                    -- nombre legible (Sprint 5)
+                fecha_hora  TEXT    NOT NULL,
+                placa       TEXT    NOT NULL,
+                descripcion TEXT    NOT NULL,
+                precio      REAL    NOT NULL,
+                chat_id     INTEGER NOT NULL,
+                anulado     INTEGER NOT NULL DEFAULT 0,
+                taller_id   INTEGER,                    -- de que taller es (S6)
+                usuario_id  INTEGER,                    -- quien lo registro
+                mecanico    TEXT
             )
             """
         )
-        # Migracion para BD creadas antes del Sprint 5
+        # Migracion para BD mas viejas que el Sprint 5/6
         for columna, tipo in (
             ("anulado", "INTEGER NOT NULL DEFAULT 0"),
             ("usuario_id", "INTEGER"),
             ("mecanico", "TEXT"),
+            ("taller_id", "INTEGER"),
         ):
             try:
-                conn.execute(f"ALTER TABLE trabajos ADD COLUMN {columna} {tipo}")
+                conn.execute(
+                    f"ALTER TABLE trabajos ADD COLUMN {columna} {tipo}"
+                )
             except sqlite3.OperationalError:
-                pass  # ya existia
+                pass  # ya existe
+
+        _migrar_antiguo(conn, duenos_antiguos or {})
+
+
+def _migrar_antiguo(conn: sqlite3.Connection, duenos_antiguos: dict[int, str]) -> None:
+    """Instalaciones previas: trabajos sin taller + duenos del .env -> BD."""
+    n_talleres = conn.execute("SELECT COUNT(*) FROM talleres").fetchone()[0]
+    n_trabajos = conn.execute("SELECT COUNT(*) FROM trabajos").fetchone()[0]
+    if n_talleres > 0 or (n_trabajos == 0 and not duenos_antiguos):
+        return
+
+    creado = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO talleres (nombre, creado) VALUES ('Taller Prueba', ?)",
+        (creado,),
+    )
+    taller_id = conn.execute(
+        "SELECT id FROM talleres ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    print(f"Migracion: trabajos antiguos -> nuevo taller #{taller_id} 'Taller Prueba'")
+
+    conn.execute(
+        "UPDATE trabajos SET taller_id = ? WHERE taller_id IS NULL", (taller_id,)
+    )
+    for user_id, nombre in duenos_antiguos.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO usuarios (user_id, taller_id, nombre, rol, activo) "
+            "VALUES (?, ?, ?, 'dueno', 1)",
+            (user_id, taller_id, nombre or "Dueño"),
+        )
+
+
+# ----------------------- Talleres y usuarios -----------------------
+
+
+def crear_taller(nombre: str, dueno_id: int, dueno_nombre: str) -> int:
+    """Registra un taller nuevo con su dueno. Devuelve el id del taller."""
+    ahora = datetime.now().isoformat()
+    with conectar() as conn:
+        cursor = conn.execute(
+            "INSERT INTO talleres (nombre, creado) VALUES (?, ?)",
+            (nombre, ahora),
+        )
+        taller_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO usuarios (user_id, taller_id, nombre, rol, activo) "
+            "VALUES (?, ?, ?, 'dueno', 1)",
+            (dueno_id, taller_id, dueno_nombre),
+        )
+        return taller_id
+
+
+def agregar_usuario(user_id: int, taller_id: int, nombre: str, rol: str) -> bool:
+    """Agrega (o reactiva) un usuario en un taller con rol dueno/mecanico."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO usuarios (user_id, taller_id, nombre, rol, activo)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                taller_id = excluded.taller_id,
+                nombre    = excluded.nombre,
+                rol       = excluded.rol,
+                activo    = 1
+            """,
+            (user_id, taller_id, nombre, rol),
+        )
+        return cursor.rowcount == 1
+
+
+def cambiar_rol(user_id: int, rol: str, taller_id: int) -> bool:
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE usuarios SET rol = ? WHERE user_id = ? AND taller_id = ?",
+            (rol, user_id, taller_id),
+        )
+        return cursor.rowcount == 1
+
+
+def expulsar_usuario(user_id: int, taller_id: int) -> bool:
+    """Desactiva al usuario (borrado logico; puede volver con otro link)."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE usuarios SET activo = 0 WHERE user_id = ? AND taller_id = ?",
+            (user_id, taller_id),
+        )
+        return cursor.rowcount == 1
+
+
+def usuario_por_id(user_id: int) -> sqlite3.Row | None:
+    """El perfil (taller, rol, nombre) de un usuario activo."""
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM usuarios WHERE user_id = ? AND activo = 1", (user_id,)
+        ).fetchone()
+
+
+def usuario_por_id_con_inactivo(user_id: int) -> sqlite3.Row | None:
+    """Incluye expulsados (motivo: mensajes claros al reintentar)."""
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM usuarios WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+
+def personal_del_taller(taller_id: int) -> list[sqlite3.Row]:
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM usuarios WHERE taller_id = ? ORDER BY rol, nombre",
+            (taller_id,),
+        ).fetchall()
+
+
+def obtener_taller(taller_id: int) -> sqlite3.Row | None:
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM talleres WHERE id = ?", (taller_id,)
+        ).fetchone()
+
+
+# ----------------------- Invitaciones y solicitudes -----------------------
+
+
+def crear_invitacion(taller_id: int, rol: str, creada_por: int) -> str:
+    """Genera un codigo para el deep link de invitacion (reusable)."""
+    codigo = secrets.token_hex(8)
+    with conectar() as conn:
+        conn.execute(
+            "INSERT INTO invitaciones (codigo, taller_id, rol, creada_por, activa) "
+            "VALUES (?, ?, ?, ?, 1)",
+            (codigo, taller_id, rol, creada_por),
+        )
+        return codigo
+
+
+def invitacion_por_codigo(codigo: str) -> sqlite3.Row | None:
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM invitaciones WHERE codigo = ?", (codigo,)
+        ).fetchone()
+
+
+def revocar_invitacion(codigo: str, taller_id: int) -> bool:
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE invitaciones SET activa = 0 WHERE codigo = ? AND taller_id = ?",
+            (codigo, taller_id),
+        )
+        return cursor.rowcount == 1
+
+
+def crear_solicitud(codigo: str, user_id: int, nombre: str) -> int | None:
+    """Guarda el 'quiero unirme'. Devuelve id o None si ya hay pendiente."""
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        fila = conn.execute(
+            "SELECT id, estado FROM solicitudes WHERE codigo = ? AND user_id = ?",
+            (codigo, user_id),
+        ).fetchone()
+        if fila and fila["estado"] == "pendiente":
+            return None
+        if fila:  # quedo rechazada hace rato: se reintenta
+            conn.execute(
+                "UPDATE solicitudes SET estado = 'pendiente' WHERE id = ?",
+                (fila["id"],),
+            )
+            return fila["id"]
+        cursor = conn.execute(
+            "INSERT INTO solicitudes (codigo, user_id, nombre) VALUES (?, ?, ?)",
+            (codigo, user_id, nombre),
+        )
+        return cursor.lastrowid
+
+
+def solicitud_por_id(solicitud_id: int) -> sqlite3.Row | None:
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            "SELECT * FROM solicitudes WHERE id = ?", (solicitud_id,)
+        ).fetchone()
+
+
+def decidir_solicitud(solicitud_id: int, aceptada: bool) -> None:
+    with conectar() as conn:
+        conn.execute(
+            "UPDATE solicitudes SET estado = ? WHERE id = ?",
+            ("aceptada" if aceptada else "rechazada", solicitud_id),
+        )
+
+
+# ----------------------- Trabajos -----------------------
 
 
 def agregar_trabajo(
@@ -59,36 +311,41 @@ def agregar_trabajo(
     descripcion: str,
     precio: float,
     chat_id: int,
+    taller_id: int,
     usuario_id: int | None = None,
     mecanico: str | None = None,
 ) -> int:
-    """Guarda un trabajo firmado por quien lo registro. Devuelve el id."""
+    """Guarda un trabajo firmado. Devuelve el id."""
     ahora = datetime.now().isoformat()
     with conectar() as conn:
         cursor = conn.execute(
-            "INSERT INTO trabajos (fecha_hora, placa, descripcion, precio, chat_id, anulado, usuario_id, mecanico) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-            (ahora, placa.strip().upper(), descripcion, precio, chat_id, usuario_id, mecanico),
+            "INSERT INTO trabajos (fecha_hora, placa, descripcion, precio, chat_id, anulado, taller_id, usuario_id, mecanico) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+            (ahora, placa.strip().upper(), descripcion, precio, chat_id,
+             taller_id, usuario_id, mecanico),
         )
         return cursor.lastrowid
 
 
 # ------------------------- Consultas -------------------------
 
+# TODAS llevan taller_id para el aislamiento multi-taller (S6-5).
+
 
 def _trabajos_entre(
-    inicio: str, fin: str, usuario_id: int | None = None
+    inicio: str,
+    fin: str,
+    taller_id: int,
+    usuario_id: int | None = None,
 ) -> list[sqlite3.Row]:
-    """Trabajos activos entre dos fechas ISO 'YYYY-MM-DD'.
-
-    usuario_id filtra solo la firma de ese mecanico (None = todos).
-    """
+    """Trabajos activos del taller entre dos fechas ISO 'YYYY-MM-DD'."""
     sql = (
         "SELECT * FROM trabajos "
-        "WHERE anulado = 0 AND substr(fecha_hora, 1, 10) >= ? "
+        "WHERE anulado = 0 AND taller_id = ? "
+        "AND substr(fecha_hora, 1, 10) >= ? "
         "AND substr(fecha_hora, 1, 10) <= ?"
     )
-    parametros: list = [inicio, fin]
+    parametros: list = [taller_id, inicio, fin]
     if usuario_id is not None:
         sql += " AND usuario_id = ?"
         parametros.append(usuario_id)
@@ -98,15 +355,15 @@ def _trabajos_entre(
 
 
 def _resumen_entre(
-    inicio: str, fin: str, usuario_id: int | None = None
+    inicio: str, fin: str, taller_id: int, usuario_id: int | None = None
 ) -> tuple[int, float]:
-    """(cantidad, suma) de trabajos activos entre dos fechas."""
+    """(cantidad, suma) activo del taller entre dos fechas."""
     sql = (
         "SELECT COUNT(*) AS cantidad, IFNULL(SUM(precio), 0) AS suma "
-        "FROM trabajos WHERE anulado = 0 "
+        "FROM trabajos WHERE anulado = 0 AND taller_id = ? "
         "AND substr(fecha_hora, 1, 10) >= ? AND substr(fecha_hora, 1, 10) <= ?"
     )
-    parametros: list = [inicio, fin]
+    parametros: list = [taller_id, inicio, fin]
     if usuario_id is not None:
         sql += " AND usuario_id = ?"
         parametros.append(usuario_id)
@@ -117,7 +374,7 @@ def _resumen_entre(
 
 
 def rango_periodo(dias: int | None = None, mes: bool = False) -> tuple[str, str, str]:
-    """(inicio, fin, etiqueta) del periodo: hoy / N dias / mes en curso."""
+    """(inicio, fin, etiqueta): hoy / N dias / mes en curso."""
     hoy = datetime.now()
     fin = hoy.strftime("%Y-%m-%d")
     if mes:
@@ -132,48 +389,50 @@ def rango_periodo(dias: int | None = None, mes: bool = False) -> tuple[str, str,
     return inicio, fin, etiqueta
 
 
-def trabajos_hoy(usuario_id: int | None = None) -> list[sqlite3.Row]:
-    """Trabajos de HOY en orden de registro (S2-1). Filtrables por mecánico."""
+def trabajos_hoy(taller_id: int, usuario_id: int | None = None) -> list[sqlite3.Row]:
     hoy = datetime.now().strftime("%Y-%m-%d")
-    return _trabajos_entre(hoy, hoy, usuario_id)
+    return _trabajos_entre(hoy, hoy, taller_id, usuario_id)
 
 
 def resumen_periodo(
-    dias: int | None = None, mes: bool = False, mecanico_id: int | None = None
+    taller_id: int,
+    dias: int | None = None,
+    mes: bool = False,
+    mecanico_id: int | None = None,
 ) -> tuple[str, int, float]:
-    """(etiqueta, cantidad, suma) del periodo, opcionalmente solo de un mecánico."""
+    """(etiqueta, cantidad, suma) del taller, opcional solo de un mecánico."""
     inicio, fin, etiqueta = rango_periodo(dias, mes)
-    cantidad, suma = _resumen_entre(inicio, fin, mecanico_id)
+    cantidad, suma = _resumen_entre(inicio, fin, taller_id, mecanico_id)
     return etiqueta, cantidad, suma
 
 
 def desglose_mecanicos(
-    dias: int | None = None, mes: bool = False
+    taller_id: int, dias: int | None = None, mes: bool = False
 ) -> tuple[str, list[tuple[str, int, float]]]:
-    """(etiqueta, [(mecanico, cantidad, suma), ...]) para el dueño (S5-3)."""
+    """(etiqueta, [(mecanico, cantidad, suma), ...]) para el dueño."""
     inicio, fin, etiqueta = rango_periodo(dias, mes)
     with conectar() as conn:
         conn.row_factory = _ROW_FACTORY
         filas = conn.execute(
             "SELECT mecanico, COUNT(*) AS cantidad, IFNULL(SUM(precio), 0) AS suma "
-            "FROM trabajos WHERE anulado = 0 "
+            "FROM trabajos WHERE anulado = 0 AND taller_id = ? "
             "AND substr(fecha_hora, 1, 10) >= ? AND substr(fecha_hora, 1, 10) <= ? "
             "GROUP BY mecanico ORDER BY suma DESC",
-            (inicio, fin),
+            (taller_id, inicio, fin),
         ).fetchall()
     resumen = [
-        (fila["mecanico"] if fila["mecanico"] else "sin firmar", fila["cantidad"], fila["suma"])
+        (fila["mecanico"] or "sin firmar", fila["cantidad"], fila["suma"])
         for fila in filas
     ]
     return etiqueta, resumen
 
 
 def historial_placa(
-    placa: str, usuario_id: int | None = None, limite: int = 20
+    placa: str, taller_id: int, usuario_id: int | None = None, limite: int = 20
 ) -> tuple[list[sqlite3.Row], int, float]:
-    """(trabajos_recientes, total_historico, suma_total) de un vehículo."""
-    sql_base = "FROM trabajos WHERE anulado = 0 AND placa = ?"
-    parametros: list = [placa]
+    """(recientes, total_historico, suma_total) del vehículo EN ESE taller."""
+    sql_base = "FROM trabajos WHERE anulado = 0 AND taller_id = ? AND placa = ?"
+    parametros: list = [taller_id, placa]
     if usuario_id is not None:
         sql_base += " AND usuario_id = ?"
         parametros.append(usuario_id)
@@ -190,7 +449,6 @@ def historial_placa(
 
 
 def trabajo_por_id(trabajo_id: int) -> sqlite3.Row | None:
-    """Un trabajo específico (para confirmar antes de anular, S2-4)."""
     with conectar() as conn:
         conn.row_factory = _ROW_FACTORY
         return conn.execute(
@@ -198,11 +456,12 @@ def trabajo_por_id(trabajo_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def anular_trabajo(trabajo_id: int) -> bool:
-    """Marca un trabajo como anulado (no borra fisicamente). True si existia."""
+def anular_trabajo(trabajo_id: int, taller_id: int) -> bool:
+    """Anula solo si el trabajo pertenece al taller (borrado logico)."""
     with conectar() as conn:
         cursor = conn.execute(
-            "UPDATE trabajos SET anulado = 1 WHERE id = ? AND anulado = 0",
-            (trabajo_id,),
+            "UPDATE trabajos SET anulado = 1 "
+            "WHERE id = ? AND anulado = 0 AND taller_id = ?",
+            (trabajo_id, taller_id),
         )
         return cursor.rowcount == 1

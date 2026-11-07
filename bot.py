@@ -1,8 +1,13 @@
-"""Bot del taller - Sprint 5: roles (dueño/mecánicos), firma y textos limpios.
+"""Bot del taller - Sprint 6: MULTI-TENANT.
 
-- El mecánico envía: ABC123 cambio de aceite 45000 → queda firmado con su nombre.
-- Mecánico: solo ve SUS trabajos/ganancias. Dueño (ADMIN_IDS): ve todo + desglose.
-- Todas las respuestas van con parse_mode=HTML via responder() (nada de '<b>' literal).
+Varios talleres conviven en un solo bot. Cada taller tiene dueno(s) y
+mecanicos, gestionados desde el propio chat:
+
+- /nuevotaller crea tu taller y quedas como su dueno.
+- /invitar mecanico|dueno genera el link de invitacion.
+- El candidato abre el link, pide unirse y el dueno acepta via botones.
+- Todo lo demas (/historialdia, /ganancias...) muestra SOLO los datos
+  del taller del usuario y respeta el rol.
 """
 import csv
 import io
@@ -42,7 +47,7 @@ from parser import (
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# ── Logs: consola + archivo rotativo (S3-3) ─────────────────────────────
+# ── Logs: consola + archivo rotativo ────────────────────────────────────
 FORMATO_LOG = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 manejador_consola = logging.StreamHandler()
 manejador_consola.setFormatter(logging.Formatter(FORMATO_LOG))
@@ -57,28 +62,18 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("taller-bot")
 
-# ── Errores del parser (cortos, S1-4/S5-6) ──────────────────────────────
+EJEMPLO = "<code>ABC123 cambio de aceite 45000</code>"
 MENSAJES_DE_ERROR = {
     MOTIVO_VACIO: "Escríbeme algo 👀",
-    MOTIVO_PLACA: (
-        "No vi la placa 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-    MOTIVO_PRECIO: (
-        "Falta el precio 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-    MOTIVO_DESCRIPCION: (
-        "Falta el trabajo 🤔\nEj: <code>ABC123 cambio de aceite 45000</code>"
-    ),
-    MOTIVO_VARIAS_PLACAS: (
-        "Vi varias placas 🤔 déjame solo una.\n"
-        "Ej: <code>ABC123 cambio de aceite 45000</code>"
-    ),
+    MOTIVO_PLACA: f"No vi la placa 🤔\nEj: {EJEMPLO}",
+    MOTIVO_PRECIO: f"Falta el precio 🤔\nEj: {EJEMPLO}",
+    MOTIVO_DESCRIPCION: f"Falta el trabajo 🤔\nEj: {EJEMPLO}",
+    MOTIVO_VARIAS_PLACAS: f"Vi varias placas 🤔 déjame solo una.\nEj: {EJEMPLO}",
 }
-
-EJEMPLO = "<code>ABC123 cambio de aceite 45000</code>"
 
 
 # ── Helpers de formato ──────────────────────────────────────────────────
+
 
 def formatear_dinero(valor: float) -> str:
     """45000.0 -> '$ 45.000' (estilo Colombia)."""
@@ -86,28 +81,22 @@ def formatear_dinero(valor: float) -> str:
 
 
 def formatear_fecha(mensaje_dt: datetime) -> str:
-    """16/11/2026 02:45 pm."""
     return mensaje_dt.strftime("%d/%m/%Y %I:%M %p").lower()
 
 
 async def responder(update: Update, texto: str, **extra) -> None:
-    """ÚNICO canal de respuestas: SIEMPRE lleva formato HTML (fix S5-6)."""
+    """ÚNICO canal de respuestas: SIEMPRE formato HTML."""
     await update.message.reply_text(texto, parse_mode="HTML", **extra)
 
 
 def protegido(func):
-    """Solo deja pasar a admins y mecánicos del .env (S3-1)."""
+    """Solo deja pasar a usuarios activos de algún taller (S3-1/S6)."""
 
     @wraps(func)
     async def envoltura(update, context, *args, **kwargs):
         usuario = update.effective_user.id if update.effective_user else None
         if not roles.es_autorizado(usuario):
-            logger.warning(
-                "Acceso denegado: id=%s nombre=%r mensaje=%r",
-                usuario,
-                update.effective_user.full_name if update.effective_user else "?",
-                update.effective_message.text if update.effective_message else "?",
-            )
+            logger.warning("Acceso denegado: id=%s", usuario)
             return
         return await func(update, context, *args, **kwargs)
 
@@ -115,7 +104,6 @@ def protegido(func):
 
 
 def _linea_trabajo(fila, con_mecanico: bool = False) -> str:
-    """Línea compacta: #7 09:15 · ABC123 · descripcion · $ x [· nombre]"""
     hora = datetime.fromisoformat(fila["fecha_hora"]).strftime("%I:%M %p").lower()
     mecanico = f" · {fila['mecanico'] or 'sin firmar'}" if con_mecanico else ""
     return (
@@ -124,16 +112,321 @@ def _linea_trabajo(fila, con_mecanico: bool = False) -> str:
     )
 
 
-# ── Comandos ────────────────────────────────────────────────────────────
+def _perfil(update: Update):
+    """El perfil (taller_id, rol, nombre) del usuario que escribe."""
+    return roles.perfil(update.effective_user.id)
 
-@protegido
+
+# ── Onboarding multi-taller (comandos públicos) ─────────────────────────
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start normal, o con payload del deep link (?start=CODIGO)."""
+    user = update.effective_user
+    if context.args:
+        await _procesar_link_invitacion(update, context, context.args[0])
+        return
+    perfil_usuario = roles.perfil(user.id)
+    if perfil_usuario is None:
+        await responder(
+            update,
+            "👋 Hola! Este bot es para talleres que ya están conectados.\n\n"
+            "Si tu dueño te invitó, haz el link que te mandó.\n"
+            "Si quieres montar TU taller: <code>/nuevotaller</code>",
+        )
+        return
+    nombre_taller = db.obtener_taller(perfil_usuario["taller_id"])["nombre"]
     await responder(
         update,
-        "🛠️ <b>Bot del taller</b>\n"
-        "Mándame un mensaje con <b>placa + trabajo + precio</b>:\n"
-        f"{EJEMPLO}\n/ayuda → comandos",
+        f"🛠️ <b>{nombre_taller}</b> — hola {user.first_name}!\n"
+        "Registra cada trabajo así: placa + trabajo + precio:\n"
+        f"{EJEMPLO}\n/ayuda → todos los comandos",
     )
+
+
+async def _procesar_link_invitacion(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, codigo: str
+) -> None:
+    """Abrió un link de invitación. Pública a propósito (no pertenecía antes)."""
+    user = update.effective_user
+    invitacion = db.invitacion_por_codigo(codigo)
+    if invitacion is None or not invitacion["activa"]:
+        await responder(update, "🔗 Este link ya no está vigente (caducó o fue revocado).")
+        return
+    perfil_usuario = roles.perfil(user.id)
+    if perfil_usuario is not None:
+        if perfil_usuario["taller_id"] == invitacion["taller_id"]:
+            await responder(update, "🤗 Ya estás en este taller.")
+        else:
+            await responder(
+                update,
+                "🤔 Ya perteneces a otro taller.\n"
+                "Para cambiarte, tienes que ser desvinculado del actual y volver a abrir el link.",
+            )
+        return
+    taller = db.obtener_taller(invitacion["taller_id"])
+    solicitud_id = db.crear_solicitud(
+        codigo, user.id, user.full_name or user.first_name
+    )
+    if solicitud_id is None:
+        await responder(update, "📨 Tu solicitud ya está en cola, esperando al dueño.")
+        return
+    await responder(
+        update,
+        f"🤝 Unirme a <b>{taller['nombre']}</b> como <b>{invitacion['rol']}</b>?\n"
+        "La solicitud le va a llegar al dueño para que la acepte:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🤝 Solicitar unirme", callback_data=f"soli:{solicitud_id}")
+        ]]),
+    )
+    logger.info("Solicitud #%s del user %s para invitación %s",
+                solicitud_id, user.id, codigo)
+
+
+async def nuevotaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/nuevotaller [nombre] — el creador queda como dueno. Público con guardia."""
+    user = update.effective_user
+    perfil_usuario = roles.perfil(user.id)
+    if perfil_usuario is not None:
+        taller_actual = db.obtener_taller(perfil_usuario["taller_id"])
+        await responder(
+            update,
+            f"🤔 Ya perteneces al taller <b>{taller_actual['nombre']}</b>.\n"
+            "Si quieres otro taller, primero el dueño de ese te tiene que desvincular.",
+        )
+        return
+    nombre = " ".join(context.args).strip() or f"Taller {user.first_name}"
+    taller_id = db.crear_taller(nombre, user.id, user.full_name or user.first_name)
+    logger.info("Taller #%s '%s' creado por %s", taller_id, nombre, user.id)
+    await responder(
+        update,
+        f"🎉 <b>{nombre}</b> listo y ERES su dueño!\n\n"
+        "Invita a tu gente:\n"
+        "🔧 <code>/invitar mecanico</code>\n"
+        "👑 <code>/invitar dueno</code>\n\n"
+        "Y para registrar: placa + trabajo + precio\n"
+        f"{EJEMPLO}",
+    )
+
+
+# ── Invitaciones y personal ─────────────────────────────────────────────
+
+
+@protegido
+async def invitar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/invitar mecanico|dueno -> link para compartir (S6-3)."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    rol = (context.args[0].strip().lower() if context.args else "")
+    if rol not in (db.ROL_MECANICO, db.ROL_DUENO):
+        await responder(
+            update,
+            "Indica el rol:\n<code>/invitar mecanico</code>\n<code>/invitar dueno</code>",
+        )
+        return
+    taller_id = roles.taller_de(user.id)
+    codigo = db.crear_invitacion(taller_id, rol, user.id)
+    await responder(
+        update,
+        f"🔗 <b>Link de invitación</b> (rol: <b>{rol}</b>):\n\n"
+        f"https://t.me/{context.bot.username}?start={codigo}\n\n"
+        "Comparte ese link. Cuando abran el chat y toquen <b>🤝 Solicitar unirme</b>, "
+        "te llega la solicitud para aceptar o rechazar.\n"
+        "¿Ya no lo necesitas? <code>/revocar " + codigo + "</code>",
+    )
+    logger.info("Invitación %s (rol=%s) creada por %s", codigo, rol, user.id)
+
+
+async def procesar_solicitud(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """El candidato toca '🤝 Solicitar unirme' → la pide al dueño (público)."""
+    query = update.callback_query
+    _, solicitud_id = query.data.split(":")
+    solicitud = db.solicitud_por_id(int(solicitud_id))
+    if solicitud is None or solicitud["estado"] != "pendiente":
+        await query.answer("Solicitud ya procesada 👀", show_alert=True)
+        return
+    invitacion = db.invitacion_por_codigo(solicitud["codigo"])
+    if invitacion is None or not invitacion["activa"]:
+        await query.answer("Invitación no vigente 👀", show_alert=True)
+        return
+    nombre_taller = db.obtener_taller(invitacion["taller_id"])["nombre"]
+    teclado = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"✅ Aceptar como {invitacion['rol']}",
+            callback_data=f"inv_si:{invitacion['codigo']}:{solicitud_id}",
+        ),
+        InlineKeyboardButton(
+            "❌ Rechazar",
+            callback_data=f"inv_no:{invitacion['codigo']}:{solicitud_id}",
+        ),
+    ]])
+    try:
+        await context.bot.send_message(
+            chat_id=invitacion["creada_por"],
+            text=(
+                f"🙋 <b>{solicitud['nombre']}</b> (ID {solicitud['user_id']}) "
+                f"quiere unirse a <b>{nombre_taller}</b> como <b>{invitacion['rol']}</b>."
+            ),
+            reply_markup=teclado,
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("No pude avisar al dueno %s", invitacion["creada_por"])
+        await query.edit_message_text("⚠️ No pude avisarle al dueño.")
+        await query.answer()
+        return
+    await query.edit_message_text("📨 Solicitud enviada. Te contestamos aquí mismo.")
+    await query.answer()
+
+
+async def decidir_solicitud(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """El dueño toca ✅/❌ en la tarjeta de solicitud."""
+    query = update.callback_query
+    accion, codigo, solicitud_id = query.data.split(":")
+    invitacion = db.invitacion_por_codigo(codigo)
+    if invitacion is None or query.from_user.id != invitacion["creada_por"]:
+        await query.answer("🤷 Solo quien generó el link puede decidir.", show_alert=True)
+        return
+    solicitud = db.solicitud_por_id(int(solicitud_id))
+    if solicitud is None or solicitud["estado"] != "pendiente":
+        await query.answer("Solicitud ya procesada 👀", show_alert=True)
+        return
+    if accion == "inv_si":
+        db.agregar_usuario(
+            solicitud["user_id"], invitacion["taller_id"],
+            solicitud["nombre"], invitacion["rol"],
+        )
+        db.decidir_solicitud(solicitud["id"], True)
+        nombre_taller = db.obtener_taller(invitacion["taller_id"])["nombre"]
+        await query.edit_message_text(
+            f"✅ <b>{solicitud['nombre']}</b> ahora es <b>{invitacion['rol']}</b> "
+            f"de <b>{nombre_taller}</b>.",
+            parse_mode="HTML",
+        )
+        try:
+            await context.bot.send_message(
+                solicitud["user_id"],
+                f"🎉 ¡Bienvenido a <b>{nombre_taller}</b> como <b>{invitacion['rol']}</b>!\n"
+                f"Registra: {EJEMPLO}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.warning("No pude saludar al user %s", solicitud["user_id"])
+    else:
+        db.decidir_solicitud(solicitud["id"], False)
+        await query.edit_message_text("❌ Solicitud rechazada.")
+        try:
+            await context.bot.send_message(
+                solicitud["user_id"], "❌ Tu solicitud fue rechazada."
+            )
+        except Exception:
+            pass
+    logger.info("Solicitud #%s %s por %s", solicitud["id"], accion, query.from_user.id)
+    await query.answer()
+
+
+@protegido
+async def personal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/personal — lista del staff del propio taller (dueño)."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    personal_fila = db.personal_del_taller(roles.taller_de(user.id))
+    dueños, mecanicos = [], []
+    for fila in personal_fila:
+        if not fila["activo"]:
+            continue
+        linea = f"▸ {fila['nombre']} (ID {fila['user_id']})"
+        (dueños if fila["rol"] == db.ROL_DUENO else mecanicos).append(linea)
+    texto = "👥 <b>Personal del taller</b>\n👑 Dueños:\n" + "\n".join(dueños)
+    if mecanicos:
+        texto += "\n🔧 Mecánicos:\n" + "\n".join(mecanicos)
+    texto += (
+        "\n\nManejo:\n"
+        "<code>/rol ID mecanico|dueno</code>\n"
+        "<code>/expulsar ID</code>\n"
+        "<code>/invitar mecanico|dueno</code>"
+    )
+    await responder(update, texto)
+
+
+@protegido
+async def cambiar_rol_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rol ID mecanico|dueno — cambia el rol si es del mismo taller."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    if len(context.args) != 2 or not context.args[0].isdigit():
+        await responder(update, "Así: <code>/rol 123456 mecanico</code>")
+        return
+    objetivo, rol = int(context.args[0]), context.args[1].lower()
+    if rol not in (db.ROL_MECANICO, db.ROL_DUENO):
+        await responder(update, "Roles válidos: mecanico o dueno.")
+        return
+    perfil_objetivo = roles.perfil(objetivo)
+    if perfil_objetivo is None or perfil_objetivo["taller_id"] != roles.taller_de(user.id):
+        await responder(update, f"No encontré a {objetivo} en este taller 🤷")
+        return
+    db.cambiar_rol(objetivo, rol, roles.taller_de(user.id))
+    await responder(
+        update,
+        f"✅ {perfil_objetivo['nombre']} ahora es <b>{rol}</b>.",
+    )
+    logger.info("Rol de %s -> %s por %s", objetivo, rol, user.id)
+
+
+@protegido
+async def expulsar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/expulsar ID — desvincula al usuario del taller (puede volver con link)."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await responder(update, "Así: <code>/expulsar 123456</code>")
+        return
+    objetivo = int(context.args[0])
+    if objetivo == user.id:
+        await responder(update, "🤔 No te puedes expulsar a ti mismo.")
+        return
+    perfil_objetivo = roles.perfil(objetivo)
+    if perfil_objetivo is None or perfil_objetivo["taller_id"] != roles.taller_de(user.id):
+        await responder(update, f"No encontré a {objetivo} en este taller 🤷")
+        return
+    db.expulsar_usuario(objetivo, roles.taller_de(user.id))
+    await responder(update, f"🚪 {perfil_objetivo['nombre']} quedó desvinculado.")
+    try:
+        await context.bot.send_message(
+            objetivo, "🚪 Fuiste desvinculado del taller."
+        )
+    except Exception:
+        pass
+    logger.info("Expulsado %s por %s", objetivo, user.id)
+
+
+@protegido
+async def revocar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/revocar CODIGO — mata un link de invitación."""
+    if not roles.es_dueno(update.effective_user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    if not context.args:
+        await responder(update, "Así: <code>/revocar CODIGO</code>")
+        return
+    revocado = db.revocar_invitacion(
+        context.args[0].strip(), roles.taller_de(update.effective_user.id)
+    )
+    await responder(
+        update,
+        "🗑️ Link revocado." if revocado else "No encontré ese link 🤷",
+    )
+
+
+# ── Comandos del día a día (verificados por taller y rol) ───────────────
 
 
 @protegido
@@ -148,43 +441,41 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔍 /buscar PLACA — historial de un vehículo\n"
         "🗑️ /borrar # — anular un registro\n"
         "📄 /exportar [7 | mes] — CSV (solo dueño)\n"
+        "👥 /personal — staff (solo dueño)\n"
         "ℹ️ /ayuda",
     )
 
 
 @protegido
 async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Dueño: todos con nombre. Mecánico: solo los suyos (S5-3)."""
-    usuario_solicita = update.effective_user.id
-    es_admin = roles.es_admin(usuario_solicita)
-    filas = (
-        db.trabajos_hoy() if es_admin else db.trabajos_hoy(usuario_id=usuario_solicita)
+    """Dueño: todos con nombre. Mecánico: solo los suyos."""
+    perfil_usuario = _perfil(update)
+    es_dueno = roles.es_dueno(update.effective_user.id)
+    filas = db.trabajos_hoy(
+        perfil_usuario["taller_id"],
+        None if es_dueno else update.effective_user.id,
     )
     if not filas:
         await responder(update, "😌 Sin trabajos registrados hoy.")
         return
     total = sum(fila["precio"] for fila in filas)
-    lista = "\n".join(
-        _linea_trabajo(fila, con_mecanico=es_admin) for fila in filas
-    )
-    quien = "Trabajos de hoy" if es_admin else "Tus trabajos de hoy"
+    lista = "\n".join(_linea_trabajo(f, con_mecanico=es_dueno) for f in filas)
+    titulo = "Trabajos de hoy" if es_dueno else "Tus trabajos de hoy"
     await responder(
         update,
-        f"🌅 <b>{quien}</b>\n{lista}\n\n"
-        f"💰 <b>Total{' del día' if es_admin else ''}: {formatear_dinero(total)}</b>"
+        f"🌅 <b>{titulo}</b>\n{lista}\n\n"
+        f"💰 <b>Total{' del día' if es_dueno else ''}: {formatear_dinero(total)}</b>"
         f" ({len(filas)} trabajo{'s' if len(filas) != 1 else ''})",
     )
 
 
 @protegido
 async def ganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Dueño: total del taller + desglose. Mecánico: solo lo suyo."""
     await _reporte_ganancias(update, context, solo_propias=False)
 
 
 @protegido
 async def misganancias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Alias claro: SIEMPRE lo propio (aunque quien lo mande sea el dueño)."""
     await _reporte_ganancias(update, context, solo_propias=True)
 
 
@@ -205,25 +496,25 @@ async def _reporte_ganancias(
             "<code>/ganancias mes</code>",
         )
         return
-    usuario_solicita = update.effective_user.id
-    solo_del_dueno = roles.es_admin(usuario_solicita) and not solo_propias
+    perfil_usuario = _perfil(update)
+    taller_id = perfil_usuario["taller_id"]
+    ver_todos = roles.es_dueno(update.effective_user.id) and not solo_propias
 
-    if solo_del_dueno:
-        etiqueta, cantidad, suma = db.resumen_periodo(dias=dias, mes=mes)
+    if ver_todos:
+        etiqueta, cantidad, suma = db.resumen_periodo(taller_id, dias=dias, mes=mes)
         texto = f"💼 <b>Ganancias de {etiqueta}</b>\n💰 <b>{formatear_dinero(suma)}</b>"
-        # Desglose por mecánico (S5-3)
-        etiqueta2, desglose = db.desglose_mecanicos(dias=dias, mes=mes)
+        _, desglose = db.desglose_mecanicos(taller_id, dias=dias, mes=mes)
         if desglose:
             lineas = "\n".join(
-                f"👤 {nombre}: {formatear_dinero(suma_monto)} ({cantidad}) "
-                for nombre, cantidad, suma_monto in desglose
+                f"👤 {nombre}: {formatear_dinero(suma_monto)} ({cantidad_personas})"
+                for nombre, cantidad_personas, suma_monto in desglose
             )
             texto += f"\n\n<b>Por mecánico</b>:\n{lineas}"
         elif cantidad == 0:
             texto = f"😌 Sin trabajos en {etiqueta}."
     else:
         etiqueta, cantidad, suma = db.resumen_periodo(
-            dias=dias, mes=mes, mecanico_id=usuario_solicita
+            taller_id, dias=dias, mes=mes, mecanico_id=update.effective_user.id
         )
         if cantidad == 0:
             await responder(update, f"😌 Sin trabajos tuyos en {etiqueta}.")
@@ -238,33 +529,28 @@ async def _reporte_ganancias(
 
 @protegido
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Dueño: historial completo del vehículo. Mecánico: solo sus registros."""
+    """Dueño: historial completo. Mecánico: solo sus registros."""
     if not context.args:
         await responder(update, "Dime la placa 🤔\nEj: <code>/buscar ABC123</code>")
         return
     placa = context.args[0].upper()
-    usuario_solicita = update.effective_user.id
-    es_admin = roles.es_admin(usuario_solicita)
+    perfil_usuario = _perfil(update)
+    es_dueno = roles.es_dueno(update.effective_user.id)
     filas, cantidad, suma = (
-        db.historial_placa(placa)
-        if es_admin
-        else db.historial_placa(placa, usuario_id=usuario_solicita)
+        db.historial_placa(placa, perfil_usuario["taller_id"])
+        if es_dueno
+        else db.historial_placa(placa, perfil_usuario["taller_id"],
+                                usuario_id=update.effective_user.id)
     )
     if cantidad == 0:
         await responder(
             update,
-            f"🚘 Sin trabajos para <b>{placa}</b>"
-            + ("" if es_admin else " tuyos") + ".",
+            f"🚘 Sin trabajos para <b>{placa}</b>" + ("" if es_dueno else " tuyos") + ".",
         )
         return
-    lista = "\n".join(
-        _linea_trabajo(fila, con_mecanico=es_admin) for fila in filas
-    )
-    nota = (
-        f"\n…(+{cantidad - len(filas)} más antiguos)"
-        if cantidad > len(filas) else ""
-    )
-    titulo = f"<b>{placa}</b>" if es_admin else f"<b>{placa}</b> (tus registros)"
+    lista = "\n".join(_linea_trabajo(f, con_mecanico=es_dueno) for f in filas)
+    nota = f"\n…(+{cantidad - len(filas)} más antiguos)" if cantidad > len(filas) else ""
+    titulo = f"<b>{placa}</b>" if es_dueno else f"<b>{placa}</b> (tus registros)"
     await responder(
         update,
         f"🚘 {titulo} — {cantidad} trabajo{'s' if cantidad != 1 else ''}\n"
@@ -278,25 +564,23 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await responder(update, "Número 🤔 Ej: <code>/borrar 5</code>")
         return
     trabajo_id = int(context.args[0])
+    taller_id = _perfil(update)["taller_id"]
     fila = db.trabajo_por_id(trabajo_id)
-    if fila is None or fila["anulado"]:
+    if fila is None or fila["anulado"] or fila["taller_id"] != taller_id:
         await responder(update, f"No existe el trabajo #{trabajo_id} 🤷")
         return
-    usuario_solicita = update.effective_user.id
-    if not roles.es_admin(usuario_solicita) and fila["usuario_id"] != usuario_solicita:
-        # S5-4: cada mecánico solo puede borrar lo suyo
+    usuario_id = update.effective_user.id
+    if not roles.es_dueno(usuario_id) and fila["usuario_id"] != usuario_id:
         await responder(update, "🙅 Solo puedes borrar tus propios trabajos.")
         return
-    botones = [
-        [
-            InlineKeyboardButton("🗑️ Sí, borrar", callback_data=f"borrar_si:{trabajo_id}"),
-            InlineKeyboardButton("❌ No", callback_data=f"borrar_no:{trabajo_id}"),
-        ]
-    ]
+    teclado = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑️ Sí, borrar", callback_data=f"borrar_si:{trabajo_id}"),
+        InlineKeyboardButton("❌ No", callback_data=f"borrar_no:{trabajo_id}"),
+    ]])
     await responder(
         update,
         f"¿Borrar? {_linea_trabajo(fila)}",
-        reply_markup=InlineKeyboardMarkup(botones),
+        reply_markup=teclado,
     )
 
 
@@ -304,20 +588,22 @@ async def borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     accion, trabajo_id = query.data.split(":")
+    taller_id = roles.taller_de(query.from_user.id) or 0
     fila = db.trabajo_por_id(int(trabajo_id))
-    usuario_solicita = update.effective_user.id
     puede = fila is not None and (
-        roles.es_admin(usuario_solicita) or fila["usuario_id"] == usuario_solicita
+        fila["taller_id"] == taller_id
+        and (roles.es_dueno(query.from_user.id)
+             or fila["usuario_id"] == query.from_user.id)
     )
     if not puede:
         await query.answer("No tuyo 👀", show_alert=True)
         return
     if accion == "borrar_si":
-        anulado = db.anular_trabajo(int(trabajo_id))
+        anulado = db.anular_trabajo(int(trabajo_id), taller_id)
         await query.edit_message_text(
-            f"🗑️ #{trabajo_id} anulado." if anulado else f"#{trabajo_id} ya estaba anulado 🤷",
+            f"🗑️ #{trabajo_id} anulado." if anulado else f"#{trabajo_id} ya estaba anulado 🤷"
         )
-        logger.info("Anulado #%s por %s", trabajo_id, usuario_solicita)
+        logger.info("Anulado #%s por %s", trabajo_id, query.from_user.id)
     else:
         await query.edit_message_text("😌 Quedó guardado.")
     await query.answer()
@@ -326,30 +612,26 @@ async def confirmar_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 @protegido
 async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     comando = (update.message.text or "/?").split()[0]
-    await responder(
-        update, f"No reconozco <code>{comando}</code> 🤔\nPrueba /ayuda"
-    )
+    await responder(update, f"No reconozco <code>{comando}</code> 🤔\nPrueba /ayuda")
 
 
 @protegido
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Guarda el trabajo firmado con quien lo registro (S5-2)."""
+    """Guarda el trabajo firmado y ligado al taller del usuario (S5-2/S6)."""
     try:
         resultado = parse(update.message.text)
     except ParserError as error:
         await responder(update, MENSAJES_DE_ERROR.get(error.motivo, "🤔"))
         return
-    usuario_solicita = update.effective_user.id
-    firma = (
-        roles.nombre_de(usuario_solicita)
-        or update.effective_user.first_name  # si no está etiquetado en .env
-    )
+    perfil_usuario = _perfil(update)
+    firma = perfil_usuario["nombre"] or update.effective_user.first_name
     trabajo_id = db.agregar_trabajo(
         placa=resultado.placa,
         descripcion=resultado.descripcion,
         precio=resultado.precio,
         chat_id=update.effective_chat.id,
-        usuario_id=usuario_solicita,
+        taller_id=perfil_usuario["taller_id"],
+        usuario_id=update.effective_user.id,
         mecanico=firma,
     )
     await responder(
@@ -359,15 +641,14 @@ async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"💰 {formatear_dinero(resultado.precio)}\n"
         f"👤 {firma} · {formatear_fecha(datetime.now())}",
     )
-    logger.info("Trabajo #%s: %s %s %.0f (por %s)",
-                trabajo_id, resultado.placa, resultado.descripcion,
-                resultado.precio, firma)
+    logger.info("Trabajo #%s: %s %s %.0f (por %s)", trabajo_id,
+                resultado.placa, resultado.descripcion, resultado.precio, firma)
 
 
 @protegido
 async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """CSV con los trabajos del periodo. Solo el dueño (S5-5)."""
-    if not roles.es_admin(update.effective_user.id):
+    """CSV del taller del usuario. Solo dueño (S5-5)."""
+    if not roles.es_dueno(update.effective_user.id):
         await responder(update, "🙅 Esto solo lo puede hacer el dueño.")
         return
     arg = context.args[0].lower() if context.args else "mes"
@@ -378,10 +659,15 @@ async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif arg == "hoy":
         dias, mes = None, False
     elif arg != "mes":
-        await responder(update, "Periodo: <code>/exportar</code> (mes) · <code>/exportar 7</code> · <code>/exportar hoy</code>")
+        await responder(
+            update,
+            "Periodo: <code>/exportar</code> (mes) · <code>/exportar 7</code> · "
+            "<code>/exportar hoy</code>",
+        )
         return
+    taller_id = _perfil(update)["taller_id"]
     inicio, fin, etiqueta = db.rango_periodo(dias, mes)
-    filas = db._trabajos_entre(inicio, fin)
+    filas = db._trabajos_entre(inicio, fin, taller_id)
     if not filas:
         await responder(update, f"😌 Sin datos en {etiqueta}.")
         return
@@ -397,19 +683,18 @@ async def exportar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             fila["placa"],
             fila["descripcion"],
             int(fila["precio"]),
-            fila["mecanico"] or roles.nombre_de(fila["usuario_id"]) or "sin firmar",
+            fila["mecanico"] or "sin firmar",
         ])
-    contenido = b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")  # BOM p/ Excel
-    nombre_archivo = f"taller_{inicio}_a_{fin}.csv"
+    contenido = b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")  # BOM para Excel
     await update.message.reply_document(
-        document=contenido,  # bytes van directo en PTB 22+
-        filename=nombre_archivo,
+        document=contenido,
+        filename=f"taller_{inicio}_a_{fin}.csv",
         caption=f"📄 {etiqueta} — {len(filas)} trabajos",
     )
 
 
 async def error_global(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Última línea de defensa: ningún handler tumba al bot (S3-2)."""
+    """Última linea de defensa: ningún handler tumba al bot (S3-2)."""
     logger.exception("Error no manejado", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
@@ -420,23 +705,48 @@ async def error_global(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.exception("No pude avisar el error en el chat")
 
 
+def _roles_antiguos() -> dict[int, str]:
+    """Roles legados del .env (solo se leen UNA ves para migrar a la BD)."""
+    salida: dict[int, str] = {}
+    for texto, defecto in (
+        (os.getenv("ADMIN_IDS", ""), "Dueño"),
+        (os.getenv("MECHANICS", ""), "Mecánico"),
+    ):
+        for item in texto.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" in item:
+                id_texto, nombre = item.split(":", 1)
+                salida[int(id_texto)] = nombre.strip() or defecto
+            else:
+                salida[int(item)] = defecto
+    return salida
+
+
 def main() -> None:
     if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
         raise SystemExit("Falta el token en el .env (TELEGRAM_TOKEN).")
-    if not roles.ADMIN_IDS:
-        raise SystemExit(
-            "Define quién es dueño en .env:\n  ADMIN_IDS=9136002456"
-        )
-    logger.info(
-        "Roles: %s admin(s): %s, %s mecánico(s): %s",
-        len(roles.ADMIN_IDS), list(roles.ADMIN_IDS.values()),
-        len(roles.MECANICOS), list(roles.MECANICOS.values()) or "—",
-    )
-    db.init_db()
+    db.init_db(duenos_antiguos=_roles_antiguos())  # migra si es necesario
+    with db.conectar() as conn:
+        n_talleres = conn.execute("SELECT COUNT(*) FROM talleres").fetchone()[0]
+        n_usuarios = conn.execute(
+            "SELECT COUNT(*) FROM usuarios WHERE activo = 1"
+        ).fetchone()[0]
+    logger.info("Talleres: %s | usuarios activos: %s", n_talleres, n_usuarios)
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Handlers públicos (onboarding) SIEMPRE primero
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("nuevotaller", nuevotaller))
+    # Gestión de personal
+    app.add_handler(CommandHandler("invitar", invitar))
+    app.add_handler(CommandHandler("personal", personal))
+    app.add_handler(CommandHandler("rol", cambiar_rol_cmd))
+    app.add_handler(CommandHandler("expulsar", expulsar_cmd))
+    app.add_handler(CommandHandler("revocar", revocar_cmd))
+    # Día a día
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))
     app.add_handler(CommandHandler(["ganancias", "ganancia"], ganancias))
@@ -444,8 +754,11 @@ def main() -> None:
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("borrar", borrar))
     app.add_handler(CommandHandler("exportar", exportar))
+    # Callbacks de invitaciones (con verificación interna) y de borrado
+    app.add_handler(CallbackQueryHandler(procesar_solicitud, pattern=r"^soli:"))
+    app.add_handler(CallbackQueryHandler(decidir_solicitud, pattern=r"^inv_(si|no):"))
     app.add_handler(CallbackQueryHandler(confirmar_borrar, pattern=r"^borrar_(si|no):"))
-    # Cualquier otro comando → siempre responde algo (nunca silencio)
+    # Cualquier otro comando → siempre responde algo
     app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
     # Todo texto que no sea comando es un registro
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
