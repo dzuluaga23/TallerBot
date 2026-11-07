@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -93,6 +94,23 @@ def _json_publicado() -> dict:
     return {}
 
 
+# ---------------------------------------------------------- helpers ----
+
+
+def _bd_tiene_datos(ruta: Path) -> bool:
+    """¿La BD tiene talleres? Archivo borrado / corrupto / 0 talleres = sin datos."""
+    if not ruta.exists():
+        return False
+    try:
+        con = sqlite3.connect(ruta)
+        try:
+            return con.execute("SELECT COUNT(*) FROM talleres").fetchone()[0] > 0
+        finally:
+            con.close()
+    except sqlite3.DatabaseError:
+        return False  # archivo corrupto o sin esquema: no hay datos utiles
+
+
 # ---------------------------------------------------------------- put ----
 
 
@@ -115,14 +133,18 @@ def _subir(bd_bytes: bytes, sha: str | None) -> bool:
 
 
 def respaldar_ahora(ruta_bd: Path | None = None) -> bool:
-    """Sube la BD actual al repo. False si no hay config o fallo."""
+    """Sube la BD actual al repo. False si no hay config o fallo.
+
+    PROTECCION: nunca sube una BD sin talleres — evita que un deploy con la
+    BD fresca machaque el respaldo anterior si la restauracion fallo.
+    """
     if not disponible():
         return False
-    ruta = ruta_bd or db.DB_PATH
-    if not Path(ruta).exists():
-        logger.warning("Respaldos: %s no existe todavia", ruta)
+    ruta = Path(ruta_bd or db.DB_PATH)
+    if not _bd_tiene_datos(ruta):
+        logger.info("Respaldos: BD sin talleres; no subo (protejo el respaldo previo)")
         return False
-    sha = _json_publicado().get("sha")  # None = primeros respaldo (archivo nuevo)
+    sha = _json_publicado().get("sha")  # None = primeras subida (archivo nuevo)
     return _subir(Path(ruta).read_bytes(), sha)
 
 
@@ -130,12 +152,16 @@ def respaldar_ahora(ruta_bd: Path | None = None) -> bool:
 
 
 def restaurar_si_hace_falta(ruta_bd: Path | None = None) -> bool:
-    """Si la BD falta o esta vacia, la descarga del repaldo. True = restauro."""
+    """Descarga el respaldo si la BD local NO tiene datos (falta, vacia o rota).
+
+    True = restauro. La BD default que init_db crea vacia TAMBIEN se
+    reemplaza: los datos no viven en el disco de Render (free).
+    """
     if not disponible():
         return False
     ruta = Path(ruta_bd or db.DB_PATH)
-    if ruta.exists() and ruta.stat().st_size > 0:
-        return False  # hay datos locales: nada que restaurar
+    if _bd_tiene_datos(ruta):
+        return False  # BD local con datos vivos: nada que restaurar
     codigo, cuerpo = _http("GET", accept="application/vnd.github.raw")
     if codigo != 200 or not cuerpo:
         logger.warning("Respaldos: no hay respaldo disponible (HTTP %s)", codigo)
