@@ -33,6 +33,7 @@ from telegram.ext import (
 )
 
 import db
+import factura
 import roles
 from parser import (
     MOTIVO_DESCRIPCION,
@@ -426,6 +427,143 @@ async def revocar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+@protegido
+async def datostaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/datostaller nombre=X nit=Y — datos del encabezado de la factura (S7)."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    taller_id = roles.taller_de(user.id)
+    if not context.args:
+        fila_taller = db.obtener_taller(taller_id)
+        pendiente = [
+            campo for campo in ("nit", "direccion", "telefono")
+            if not fila_taller[campo]
+        ]
+        await responder(
+            update,
+            "🏢 <b>Datos del taller</b>\n"
+            f"▸ Nombre: {fila_taller['nombre']}\n"
+            f"▸ NIT: {fila_taller['nit'] or '—'}\n"
+            f"▸ Dirección: {fila_taller['direccion'] or '—'}\n"
+            f"▸ Teléfono: {fila_taller['telefono'] or '—'}\n"
+            f"▸ Logo: {'🖼️' if fila_taller['logo'] else 'sin subir (manda una foto con /logo en el pie de foto)'}\n\n"
+            "Editar (los valores admiten espacios):\n"
+            "<code>/datostaller nombre=Taller Los Pistones</code>\n"
+            "<code>/datostaller nit=900123-4 tel=3001112333 dir=Calle 45 #12-30</code>"
+            + (f"\n\nFaltan: {', '.join(pendiente)}" if pendiente else ""),
+        )
+        return
+    campos = _parsear_pares(context.args)
+    sin_validar = campos.pop("tel", None)
+    if sin_validar:  # alias amigable
+        campos["telefono"] = sin_validar
+    sin_validar = campos.pop("dir", None)
+    if sin_validar:
+        campos["direccion"] = sin_validar
+    db.guardar_datos_taller(taller_id, campos)
+    await responder(update, "✅ Datos guardados. Úsalos en la próxima factura 🧾")
+    logger.info("Datos taller #%s actualizados por %s: %s",
+                taller_id, user.id, list(campos))
+
+
+def _parsear_pares(tokens: list[str]) -> dict[str, str]:
+    """conj天涯ere ['nit=900123-4', 'dir...', 'Calle', '45'] -> {'nit': ..., 'dir': ...}
+    Cada clave termina cuando aparece la siguiente con '='."""
+    pares: dict[str, str] = {}
+    i = 0
+    while i < len(tokens):
+        if "=" not in tokens[i]:
+            i += 1
+            continue
+        clave, valor = tokens[i].split("=", 1)
+        i += 1
+        extras = []
+        while i < len(tokens) and "=" not in tokens[i]:
+            extras.append(tokens[i])
+            i += 1
+        if extras:
+            valor = " ".join([valor] + extras)
+        if clave and valor.strip():
+            pares[clave.strip().lower()] = valor.strip()
+    return pares
+
+
+@protegido
+async def logo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/logo (con foto adjunta): guarda el logo del taller para el PDF (S7)."""
+    user = update.effective_user
+    if not roles.es_dueno(user.id):
+        await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
+        return
+    if not update.message.photo:
+        await responder(
+            update,
+            "🖼️ Sube la imagen del logo y escribe /logo en el texto adjunto "
+            "(caption) de la foto.",
+        )
+        return
+    taller_id = roles.taller_de(user.id)
+    Carpeta = "logos"
+    os.makedirs(Carpeta, exist_ok=True)
+    ruta = f"{Carpeta}/taller_{taller_id}.jpg"
+    archivo = await update.message.photo[-1].get_file()
+    contenido = await archivo.download_as_bytearray()
+    with open(ruta, "wb") as flujo:
+        flujo.write(contenido)
+    db.guardar_logo(taller_id, ruta)
+    await responder(update, "🖼️ Logo guardado. Se usará al tope de las facturas 🧾")
+    logger.info("Logo del taller #%s guardado", taller_id)
+
+
+@protegido
+async def factura_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/factura PLACA — PDF con los trabajos de HOY de esa placa (S7)."""
+    if not context.args:
+        await responder(update, "Dime la placa 🤔\nEj: <code>/factura ABC123</code>")
+        return
+    placa = context.args[0].upper()
+    perfil_usuario = _perfil(update)
+    es_dueno = roles.es_dueno(update.effective_user.id)
+    taller_id = perfil_usuario["taller_id"]
+    filas_de_hoy = db.trabajos_hoy(
+        taller_id,
+        None if es_dueno else update.effective_user.id,
+    )
+    filas = [f for f in filas_de_hoy if f["placa"] == placa]
+    if not filas:
+        quien = (
+            "sin facturación hoy para esa placa." if es_dueno
+            else "sin trabajos tuyos hoy para esa placa."
+        )
+        await responder(
+            update,
+            f"🚘 No hay trabajos de hoy de <b>{placa}</b> — {quien}",
+        )
+        return
+    fila_taller = db.obtener_taller(taller_id)
+    contenido_pdf = factura.generar_pdf(
+        nombre_taller=fila_taller["nombre"],
+        nit=fila_taller["nit"],
+        telefono=fila_taller["telefono"],
+        direccion=fila_taller["direccion"],
+        logo=fila_taller["logo"],
+        placa=placa,
+        items=filas,
+    )
+    fecha_doc = datetime.now().strftime("%Y-%m-%d")
+    await update.message.reply_document(
+        document=contenido_pdf,
+        filename=f"factura_{placa}_{fecha_doc}.pdf",
+        caption=(
+            f"🧾 Factura simple de <b>{placa}</b> — {len(filas)} trabajo(s) · "
+            f"{formatear_dinero(sum(f['precio'] for f in filas))} · (no fiscal)"
+        ),
+    )
+    logger.info("Factura %s con %s items (taller %s)", placa, len(filas), taller_id)
+
+
 # ── Comandos del día a día (verificados por taller y rol) ───────────────
 
 
@@ -441,6 +579,9 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔍 /buscar PLACA — historial de un vehículo\n"
         "🗑️ /borrar # — anular un registro\n"
         "📄 /exportar [7 | mes] — CSV (solo dueño)\n"
+        "🧾 /factura PLACA — factura simple en PDF\n"
+        "🏢 /datostaller — datos del taller (dueño)\n"
+        "🖼️ /logo — sube el logo (foto adjunta, dueño)\n"
         "👥 /personal — staff (solo dueño)\n"
         "ℹ️ /ayuda",
     )
@@ -754,6 +895,11 @@ def main() -> None:
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("borrar", borrar))
     app.add_handler(CommandHandler("exportar", exportar))
+    app.add_handler(CommandHandler("factura", factura_cmd))
+    app.add_handler(CommandHandler("datostaller", datostaller))
+    app.add_handler(CommandHandler("logo", logo))
+    # La foto adjunta con caption /logo también dispara el guardado del logo
+    app.add_handler(MessageHandler(filters.PHOTO, logo))
     # Callbacks de invitaciones (con verificación interna) y de borrado
     app.add_handler(CallbackQueryHandler(procesar_solicitud, pattern=r"^soli:"))
     app.add_handler(CallbackQueryHandler(decidir_solicitud, pattern=r"^inv_(si|no):"))

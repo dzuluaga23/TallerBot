@@ -10,5 +10,7 @@ __pycache__/
 *.db
 backups/
 
-# Logs del bot
+# Logs y archivos generados de muestra/informe
 *.log
+muestra_*.pdf
+logos/

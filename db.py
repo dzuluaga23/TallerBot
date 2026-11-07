@@ -40,9 +40,13 @@ def init_db(duenos_antiguos: dict[int, str] | None = None) -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS talleres (
-                id     INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre TEXT NOT NULL,
-                creado TEXT NOT NULL
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre    TEXT NOT NULL,
+                creado    TEXT NOT NULL,
+                nit       TEXT,    -- datos para el encabezado de la factura (S7)
+                direccion TEXT,
+                telefono  TEXT,
+                logo      TEXT     -- ruta del logo subido por el dueño
             )
             """
         )
@@ -95,21 +99,40 @@ def init_db(duenos_antiguos: dict[int, str] | None = None) -> None:
             )
             """
         )
-        # Migracion para BD mas viejas que el Sprint 5/6
+        # Migraciones para BD nacidas antes que los sprints (idempotentes)
         for columna, tipo in (
             ("anulado", "INTEGER NOT NULL DEFAULT 0"),
             ("usuario_id", "INTEGER"),
             ("mecanico", "TEXT"),
             ("taller_id", "INTEGER"),
         ):
-            try:
-                conn.execute(
-                    f"ALTER TABLE trabajos ADD COLUMN {columna} {tipo}"
-                )
-            except sqlite3.OperationalError:
-                pass  # ya existe
+            _asegurar_columna(conn, "trabajos", columna, tipo)
+        # Datos comerciales de la factura (Sprint 7)
+        for columna in ("nit", "direccion", "telefono", "logo"):
+            _asegurar_columna(conn, "talleres", columna, "TEXT")
+            # Limpieza de la version rota del ALTER (S7 dev): si los datos
+            # comerciales terminaron mal cargados en trabajos, fuera.
+            _borrar_columna_si_existe(conn, "trabajos", columna)
 
         _migrar_antiguo(conn, duenos_antiguos or {})
+
+
+def _asegurar_columna(conn: sqlite3.Connection, tabla: str, columna: str, tipo: str) -> None:
+    """ALTER TABLE idempotente (SQLite no tiene IF NOT EXISTS para columnas)."""
+    try:
+        conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
+    except sqlite3.OperationalError:
+        pass  # ya existe
+
+
+def _borrar_columna_si_existe(conn: sqlite3.Connection, tabla: str, columna: str) -> None:
+    """Retira una columna que quedó mal agregada por una migración anterior."""
+    columnas = [fila[1] for fila in conn.execute(f"PRAGMA table_info({tabla})")]
+    if columna in columnas:
+        try:
+            conn.execute(f"ALTER TABLE {tabla} DROP COLUMN {columna}")
+        except sqlite3.OperationalError:
+            pass  # SQLite viejo sin DROP COLUMN: quedará como datos residuales
 
 
 def _migrar_antiguo(conn: sqlite3.Connection, duenos_antiguos: dict[int, str]) -> None:
@@ -230,6 +253,29 @@ def obtener_taller(taller_id: int) -> sqlite3.Row | None:
         return conn.execute(
             "SELECT * FROM talleres WHERE id = ?", (taller_id,)
         ).fetchone()
+
+
+CAMPOS_TALLER = ("nombre", "nit", "direccion", "telefono")
+
+
+def guardar_datos_taller(taller_id: int, campos: dict[str, str]) -> None:
+    """Actualiza campos del encabezado comercial (whitelist S7)."""
+    limpios = {k: v for k, v in campos.items() if k in CAMPOS_TALLER and v}
+    if not limpios:
+        return
+    cambios = ", ".join(f"{k} = ?" for k in limpios)
+    with conectar() as conn:
+        conn.execute(
+            f"UPDATE talleres SET {cambios} WHERE id = ?",
+            (*limpios.values(), taller_id),
+        )
+
+
+def guardar_logo(taller_id: int, ruta_logo: str) -> None:
+    with conectar() as conn:
+        conn.execute(
+            "UPDATE talleres SET logo = ? WHERE id = ?", (ruta_logo, taller_id)
+        )
 
 
 # ----------------------- Invitaciones y solicitudes -----------------------
