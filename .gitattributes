@@ -1,0 +1,5 @@
+# Texto normal
+* text=auto
+
+# Scripts bash: SIEMPRE LF (con CRLF el Ubuntu los rechaza: "\r: command not found")
+*.sh text eol=lf

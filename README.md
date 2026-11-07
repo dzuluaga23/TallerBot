@@ -196,6 +196,7 @@ TallerBot/
 ├── parser.py    # interpreta mensajes de registro (placa/trabajo/precio)
 ├── db.py        # SQLite: talleres, usuarios, invitaciones, trabajos
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
+├── deploy/      # VM 24/7: setup Ubuntu + systemd + backup diario (mira DEPLOY.md)
 ├── tests/       # 53 tests (parser, BD, aislamiento, acceso, factura, códigos, formatos)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
@@ -206,6 +207,16 @@ TallerBot/
 ## 🏗️ Arquitectura rápida
 
 `Telegram (long polling)` → `bot.py` valida el perfil (BD) y decide por rol → `parser.py` valida el mensaje → `db.py` guarda/lee (SIEMPRE filtrado por `taller_id`) → `responder()` contesta con HTML enriquecido → para facturas, `factura.py` arma el PDF y se envía como documento.
+
+## ☁️ Despliegue 24/7 (Oracle Always Free)
+
+El bot corre gratis y siempre encendido en una VM Ubuntu de Oracle Cloud con:
+**systemd** (reinicio automático si el proceso cae), firewall con solo SSH abierto
+(el bot usa long polling: no necesita puertos) y **backup diario** de la BD
+(14 copias rotativas). Guía completa paso a paso en **[DEPLOY.md](DEPLOY.md)**.
+
+💡 Un solo detalle operativo: solo un proceso puede usar el token de Telegram a la vez.
+O sea, cuando la VM tome el turno, **apaga el bot de tu PC** (o habrá conflicto).
 
 ## 🧰 Tecnologías utilizadas
 
@@ -218,6 +229,7 @@ TallerBot/
 | Configuración | **python-dotenv** | Token en `.env` |
 | Testing | **pytest** | 53 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
+| Infraestructura | **Oracle Always Free + systemd** | VM Ubuntu 24/7 con reinicio automático y firewall mínimo |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
 
 ## 🧠 Ingeniería de software aplicada
@@ -231,11 +243,11 @@ Decisiones y prácticas de este proyecto más allá del código:
 - **Borrado lógico (soft delete):** ningún registro ni usuario se destruye; `/borrar` marca `anulado=1` y `/expulsar` marca `activo=0`. Trazabilidad para auditorías y errores humanos.
 - **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas con `ALTER TABLE` silencioso, pero SEGMENTADO POR TABLA (lección aprendida: una migración mal enfocada corrompe el esquema).
 - **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancias` sin `s`) tienen alias y un fallback.
-- **Configuración fuera del código (12-factor "config"):** el `.env` solo lleva secretos; personas y talleres se manage desde el propio producto. Escalar la operación no toca una línea de código ni requiere redeploy.
+- **Configuración fuera del código (12-factor "config"):** el `.env` solo lleva secretos; personas y talleres se manejan desde el propio producto. Escalar la operación no toca una línea de código ni requiere redeploy.
 - **Un solo canal de respuestas:** toda salida pasa por `responder()` con `parse_mode="HTML"` — imposible que un mensaje nuevo repita el bug del `<b>` literal.
 - **Testing primero donde importa:** el parser (la parte que usan manos ocupadas), el onboarding y las reglas de visibilidad por rol tienen cobertura de tests; la BD se prueba con archivos temporales `tmp_path` para no tocar datos reales.
 - **Git con disciplina:** commits por sprint con tickets (S6-3, S7-2…), `.gitignore` excluyendo secretos (`.env`), datos (`*.db`, `*.log`) y artefactos generados (`logos/`, `muestra_*.pdf`).
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ⬜ Nube gratuita (despliegue 24/7)
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. 🚧 Nube gratuita (Oracle Always Free) — código de despliegue listo, falta lanzar la VM (guía en [DEPLOY.md](DEPLOY.md))

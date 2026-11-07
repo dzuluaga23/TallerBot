@@ -1,0 +1,31 @@
+# Unidad systemd de TallerBot (Ubuntu / Oracle Always Free)
+# INSTALAR (lo hace deploy/setup.sh):
+#   sudo cp deploy/tallerbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tallerbot
+#
+# OPERAR:
+#   Ver logs en vivo:    journalctl -u tallerbot -f
+#   Reiniciar:           sudo systemctl restart tallerbot
+#   Estado:              systemctl status tallerbot
+
+[Unit]
+Description=TallerBot - bot de Telegram para talleres
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tallerbot
+Group=tallerbot
+WorkingDirectory=/opt/tallerbot
+ExecStart=/opt/tallerbot/venv/bin/python bot.py
+# Reintentos si el proceso cae (o Telegram devuelve error de red)
+Restart=always
+RestartSec=10
+# El .env lo lee el propio bot con load_dotenv(); no hace falta aqui.
+# limites basicos
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
