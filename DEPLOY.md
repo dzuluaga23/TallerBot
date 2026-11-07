@@ -16,6 +16,9 @@ registrado desde el último respaldo (máximo ~10 min). En una VM con disco (Ora
 es cero: si algún día un taller te exige cero pérdida, la migración es solo copiar el mismo
 `taller.db` a otra infraestructura — nada del código cambia.
 
+Cupo gratuito: una cuenta Render free da ~750 horas/mes corriendo — **exactamente una app
+24/7**. No crees otros servicios free en la misma cuenta o se reparten el cupo.
+
 ## 0. Pre-requisito: subir el código a GitHub
 
 ```bash
@@ -88,3 +91,13 @@ deja de correr `bot.py` localmente (o da error de conflicto de Telegram).
 - ✅ Día 1: registra un trabajo de prueba desde Telegram, confirma que a los ~10 min aparece un commit nuevo en `respaldo-taller`.
 - ✅ Día 2: Manual Deploy → **Restart** y comprueba que la BD sobrevivió (los datos de ayer siguen ahí).
 - ✅ Apaga tu PC una noche entera — el bot debe contestar igual.
+
+## 7. Solución de problemas (lo que aprendimos en vivo)
+
+| Síntoma en los logs | Qué es | Arreglo |
+|---|---|---|
+| `Conflict: terminated by other getUpdates` | Dos instancias pidiendo mensajes a la vez. Normal y **transitorio** durante un deploy (la vieja se despide mientras la nueva arranca). También sale si el bot sigue corriendo en tu PC | Espera 1-2 min (se apaga solo). Si persiste: Suspension/Resume del servicio; nunca corras `bot.py` local con el mismo token que la nube |
+| `Respaldos: subir fallo (HTTP 403) "Resource not accessible by personal access token"` | El token fine-grained no tiene permisos de escritura | Token → Repository permissions → **Contents: Read and write**, solo sobre el repo de respaldo |
+| Arranca con `Talleres: 0` tras un deploy | La restauración no corrió (token sin permiso o sin respaldo aún) | Arregla el token → Manual Deploy → Restart → debe decir `BD restaurada desde GitHub` + `Talleres: 1` |
+| Los reportes "hoy"/"mes" salen corridos en horas | El servidor vive en hora UTC | Environment → Key `TZ` = `America/Bogota` → Save |
+| El bot deja de responder al rato | Plan free: siesta tras ~15 min sin tráfico | Pinger externo a `/salud` cada 10 min (cron-job.org) |
