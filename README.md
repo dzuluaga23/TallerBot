@@ -117,13 +117,15 @@ Los roles **no** se configuran aquí desde el Sprint 6: se gestionan desde el bo
 
 Nadie puede crear un taller gratis: **se necesita un código que emite el desarrollador**.
 
-1. Vendes el bot → editas el `.env` y agregas un código nuevo a `CODIGOS_TALLER` → reinicias.
+1. Vendes el bot → agregas un código nuevo a `CODIGOS_TALLER` → reinicias:
+   - **Corriendo en Render**: es la pestaña *Environment* del dashboard (editás la variable, **Save** y el redeploy sale solito).
+   - **Corriendo local** (tu PC): editas el `.env` y vuelves a arrancar el bot.
 2. Le pasas el código al comprador junto con el link del bot.
 3. El comprador manda: `/nuevotaller VENTA-PEDRO-2026-A1 Taller Pedro Motores` → queda como dueño de su taller.
 4. **El código se quema al usarse**: la marca de "ya redimido" vive en la BD (`codigos_usados`: código, taller, quién, cuándo) — sobrevive a reinicios y no es inventable reenviando el link.
 5. Los mecánicos/dueños adicionales NO necesitan código: el dueño de cada taller ya los invita con los links normales.
 
-Es decir: como desarrollador, tu operación de venta entera es "agregar una palabra al `.env`". Catalogo en `.env`, estado de uso en la BD.
+Es decir: como desarrollador, tu operación de venta entera es "agregar una palabra en `CODIGOS_TALLER`". Catálogo en el Environment/`.env`, estado de uso en la BD.
 
 ## 🗄️ Base de datos — `taller.db` (SQLite, un solo archivo)
 
@@ -185,7 +187,7 @@ erDiagram
     }
 ```
 
-Herramientas para abrirla: **DB Browser for SQLite** (gratis). Respaldo: copia el archivo.
+Herramientas para abrirla: **DB Browser for SQLite** (gratis, solo lectura de la BD). Respaldo local: copia el archivo. **En la nube** la BD viva está dentro del contenedor de Render (sin SSH en el plan free), pero el repo de respaldo (`respaldo/taller.db`, commit cada ~10 min) sirve de copia consultable: `git pull` en tu clone y abralo en DB Browser — mira el paso a paso en [DEPLOY.md](DEPLOY.md).
 
 ## 📂 Estructura del proyecto
 
@@ -195,11 +197,10 @@ TallerBot/
 ├── factura.py   # genera el PDF de facturas (probable sin Telegram)
 ├── parser.py    # interpreta mensajes de registro (placa/trabajo/precio)
 ├── db.py        # SQLite: talleres, usuarios, invitaciones, trabajos
-├── respaldo.py  # respaldo/restauracion de la BD en GitHub (nube)
+├── respaldo.py  # BD <-> repo privado de GitHub (Render free no tiene disco)
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
-├── render.yaml   # blueprint de deployment en Render (mira DEPLOY.md)
-├── respaldo.py   # BD <-> repo privado de GitHub (Render free no tiene disco)
-├── tests/       # 63 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
+├── render.yaml  # blueprint de deployment en Render (mira DEPLOY.md)
+├── tests/       # 70 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
 ├── .env         # token (NUNCA subir a GitHub)
@@ -237,7 +238,7 @@ O sea, cuando Render tome el turno, **apaga el bot de tu PC** (o habrá conflict
 | Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
 | PDF | **fpdf2 2.9** | Facturas simples con logo y datos del taller |
 | Configuración | **python-dotenv** | Token en `.env` |
-| Testing | **pytest** | 63 tests unitarios y de integración |
+| Testing | **pytest** | 70 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
 | Infraestructura | **Render (plano free) + cron-job.org** | Hosting 24/7 respaldado con la API de contenidos de GitHub |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
