@@ -941,16 +941,19 @@ def _roles_antiguos() -> dict[int, str]:
     return salida
 
 
-def main() -> None:
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
-        raise SystemExit("Falta el token en el .env (TELEGRAM_TOKEN).")
-    db.init_db(duenos_antiguos=_roles_antiguos())  # migra si es necesario
+def _log_estado_bd() -> None:
     with db.conectar() as conn:
         n_talleres = conn.execute("SELECT COUNT(*) FROM talleres").fetchone()[0]
         n_usuarios = conn.execute(
             "SELECT COUNT(*) FROM usuarios WHERE activo = 1"
         ).fetchone()[0]
     logger.info("Talleres: %s | usuarios activos: %s", n_talleres, n_usuarios)
+
+
+def main() -> None:
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
+        raise SystemExit("Falta el token en el .env (TELEGRAM_TOKEN).")
+    db.init_db(duenos_antiguos=_roles_antiguos())  # migra si es necesario
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -995,6 +998,7 @@ def main() -> None:
             "Respaldos a GitHub activos (cada %s min%s)",
             respaldo.minutos(), ", BD restaurada" if restaurado else "",
         )
+    _log_estado_bd()
     logger.info("Bot iniciado. Ctrl+C para detener.")
     app.run_polling()
 
