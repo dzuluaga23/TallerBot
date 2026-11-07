@@ -1,8 +1,8 @@
 """Roles por taller, leidos de la BASE DE DATOS (Sprint 6).
 
 El .env dejo de manejar roles: los duenos y mecanicos se gestionan desde
-el propio bot con /nuevotaller y links de invitacion. Aki solo quedan los
-helpers de consulta que usan los handlers.
+el propio bot con /nuevotaller y links de invitacion. Aquí solo quedan
+los helpers de consulta que usan los handlers.
 """
 import db
 
@@ -22,11 +22,6 @@ def taller_de(user_id: int | None) -> int | None:
 def rol_de(user_id: int | None) -> str | None:
     fila = perfil(user_id)
     return fila["rol"] if fila else None
-
-
-def nombre_de(user_id: int | None) -> str | None:
-    fila = perfil(user_id)
-    return fila["nombre"] if fila else None
 
 
 def es_dueno(user_id: int | None) -> bool:

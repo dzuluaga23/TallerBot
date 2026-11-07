@@ -28,7 +28,7 @@ venv\Scripts\python -m pytest tests -v
 
 | Comando | Qué hace |
 |---|---|
-| `/nuevotaller CODIGO Mi Taller` | Crea el taller y el creador queda como dueño. **Requiere un código de venta de un solo uso** (lo emite el desarrollador en el `.env`) |
+| `/nuevotaller CODIGO Mi Taller` | Crea el taller y el creador queda como dueño. **Requiere un código de venta de un solo uso** (lo emite el desarrollador) |
 | `/invitar mecanico` · `/invitar dueno` | Genera un link de invitación `https://t.me/BOT?start=CODIGO` |
 | *(candidato abre el link)* | Toca "🤝 Solicitar unirme" → **la solicitud le llega al dueño con botones ✅/❌** |
 | `/personal` | Lista el staff con sus IDs |
@@ -62,6 +62,47 @@ ABC123 cambio de aceite 45000
 ## 🧾 Factura simple (PDF)
 
 `/factura ABC123` agrupa los trabajos de **hoy** de esa placa y manda el PDF como documento. Encabezado con logo, nombre, NIT, dirección y teléfono del taller (definidos con `/datostaller` y `/logo`); items con hora y precio; total; firma de quién atendió. Es un **documento no fiscal**: para factura electrónica ante la DIAN se requiere un proveedor autorizado (fuera del alcance actual).
+
+### 🏢 Identidad del taller: los datos que van en la factura
+
+Todo taller debe dejar su membrete una sola vez. Lo administra el **dueño**, desde el mismo chat del bot:
+
+| Acción | Comando | Ejemplo |
+|---|---|---|
+| Nombre del taller | `/datostaller nombre=...` | `/datostaller nombre=Taller Los Pistones` |
+| NIT | `/datostaller nit=...` | `/datostaller nit=900.123.456-7` |
+| Teléfono | `/datostaller tel=...` | `/datostaller tel=+57 300 111 2233` |
+| Dirección | `/datostaller dir=...` | `/datostaller dir=Calle 45 #12-30, Medellín` |
+| Varios a la vez | `claves=valor` separadas por espacio | `/datostaller nit=900123-4 tel=3001112233 dir=Cra 10 #20-30` |
+| Ver qué hay y qué falta | `/datostaller` (sin nada) | lista el estado actual |
+| Logo (imagen) | foto adjunta + `/logo` en la caption | 🖼️ queda como `logos/taller_N.jpg` |
+
+Detalles del diseño, por qué es cómodo de usar:
+
+- **Los valores admiten espacios**: todo lo que sigue a una clave hasta la próxima `clave=` se une como valor (`dir=Calle 45 #12-30` funciona sin comillas).
+- **`tel` y `dir` son alias cortos** de `telefono` y `direccion` — las manos no escriben de sobra.
+- **`/datostaller nombre=...` también renombra el taller** en todo el bot (el título de tus reportes ya no dice "Taller Prueba" sino tu marca real).
+- El cambio es **inmediato**: la próxima `/factura` ya sale con el nuevo membrete, sin reiniciar nada.
+- El logo se guarda en `logos/` bajo el ID del taller (aislamiento multi-taller también aquí), y si la imagen viniera corrupta, la factura sale igual — sin logo, sin caída.
+
+Así se ve el encabezado de un PDF recién emitido (con el logo en la esquina):
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ [LOGO]  TALLER LOS PISTONES                             │
+│         NIT: 900.123.456-7 · Tel: 3001112233            │
+│         Cra 10 #20-30, Medellín                         │
+│ ─────────────────────────────────────────────────────── │
+│           FACTURA SIMPLE (NO FISCAL)                    │
+│  Comprobante de pago: 07/11/2026        Placa: ABC123   │
+│  Hora         Trabajo                      Valor        │
+│  09:15 am     cambio de aceite             $ 45.000     │
+│  11:44 am     pastillas de freno           $ 120.000    │
+│                             TOTAL:          $ 165.000   │
+│         Cobrado y atendido por: Pedro                   │
+│        Documento no fiscal generado por TallerBot.      │
+└─────────────────────────────────────────────────────────┘
+```
 
 ## ⚙️ Configuración (`.env`)
 

@@ -239,15 +239,6 @@ def usuario_por_id(user_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def usuario_por_id_con_inactivo(user_id: int) -> sqlite3.Row | None:
-    """Incluye expulsados (motivo: mensajes claros al reintentar)."""
-    with conectar() as conn:
-        conn.row_factory = _ROW_FACTORY
-        return conn.execute(
-            "SELECT * FROM usuarios WHERE user_id = ?", (user_id,)
-        ).fetchone()
-
-
 def personal_del_taller(taller_id: int) -> list[sqlite3.Row]:
     with conectar() as conn:
         conn.row_factory = _ROW_FACTORY

@@ -1,7 +1,4 @@
 """Tests de la capa de datos, usando una BD temporal por test."""
-import sys
-from pathlib import Path
-
 import db  # noqa: E402  (sys.path ya lo pone conftest.py)
 from db import ROL_DUENO, ROL_MECANICO  # noqa: E402
 

@@ -25,10 +25,6 @@ def _fmt_precio(valor: float) -> str:
     return f"$ {valor:,.0f}".replace(",", ".")
 
 
-def _nueva_linea(pdf: FPDF) -> None:
-    pdf.cell(0, 0, "", new_x="LMARGIN", new_y="NEXT")
-
-
 def _contacto(nit: str | None, telefono: str | None, direccion: str | None) -> str:
     partes = []
     if nit:

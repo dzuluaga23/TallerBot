@@ -1,10 +1,4 @@
 """Tests de los campos comerciales del taller y del logo (Sprint 7)."""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import db  # noqa: E402
 
 
 def test_guardar_datos_taller_con_whitelist(bd_temporal):

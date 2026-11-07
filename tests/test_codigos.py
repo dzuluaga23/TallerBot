@@ -1,15 +1,10 @@
 """Tests de los códigos de venta de un solo uso (Sprint 8)."""
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import asyncio  # noqa: E402
-
 import bot  # noqa: E402
-import db  # noqa: E402
-from db import ROL_DUENO  # noqa: E402
 
 CODIGO = "VENTA-PEDRO-2026-A1"
 
@@ -21,10 +16,6 @@ def test_redimir_codigo_es_un_solo_uso(bd_temporal):
     assert bd.redimir_codigo(CODIGO, 999, 999) is False  # ya está quemado
     assert bd.codigo_ya_redimido(CODIGO) is True
     assert bd.codigo_ya_redimido("VENTA-OTRA-0001") is False
-
-
-def _mensaje_falso():
-    return SimpleNamespace(reply_text=None)
 
 
 def test_estado_codigo_invalido(monkeypatch, bd_temporal):
