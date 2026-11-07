@@ -260,4 +260,4 @@ Decisiones y prácticas de este proyecto más allá del código:
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. 🚧 Nube gratuita (Render free) — código de despliegue listo, falta crear los servicios (guía en [DEPLOY.md](DEPLOY.md))
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ✅ Nube gratuita (Render free, 24/7 con respaldos a GitHub — guía completa en [DEPLOY.md](DEPLOY.md))
