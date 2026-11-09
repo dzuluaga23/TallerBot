@@ -1,6 +1,33 @@
 """Tests de la capa de datos, usando una BD temporal por test."""
+import sqlite3
+
 import db  # noqa: E402  (sys.path ya lo pone conftest.py)
 from db import ROL_DUENO, ROL_MECANICO  # noqa: E402
+
+
+def test_init_db_repara_esquema_incompleto(bd_temporal, tmp_path, monkeypatch):
+    """BD de otra era (sin codigos_usados) queda sana tras init_db (Sprint 4e).
+
+    El respaldo de la nube puede traer una BD de una version vieja; el arranque
+    restaura primero y init_db() despues DEBE completar el esquema sin pisar
+    los datos existentes.
+    """
+    ruta = tmp_path / "vieja.db"
+    con = sqlite3.connect(ruta)
+    con.execute("CREATE TABLE talleres (id INTEGER PRIMARY KEY, nombre TEXT)")
+    con.execute("INSERT INTO talleres (id, nombre) VALUES (1, 'Taller Viejo')")
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(db, "DB_PATH", ruta)
+    db.init_db()
+
+    assert db.codigo_ya_redimido("CUALQUIER-CODIGO") is False  # tabla existe y anda
+    con = sqlite3.connect(ruta)
+    assert con.execute(
+        "SELECT id, nombre FROM talleres"
+    ).fetchall() == [(1, "Taller Viejo")]  # datos intactos
+    con.close()
 
 
 def test_resumen_hoy_con_trabajos(bd_temporal):

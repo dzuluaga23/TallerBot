@@ -953,7 +953,18 @@ def _log_estado_bd() -> None:
 def main() -> None:
     if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "aqui_va_el_token":
         raise SystemExit("Falta el token en el .env (TELEGRAM_TOKEN).")
-    db.init_db(duenos_antiguos=_roles_antiguos())  # migra si es necesario
+
+    # La restauracion PRIMERO: el respaldo puede traer una BD de otra era
+    # (con esquema incompleto) y init_db() debe repararla despues.
+    restaurado = False
+    if respaldo.disponible():
+        restaurado = respaldo.restaurar_si_hace_falta()
+        threading.Thread(target=respaldo.bucle, daemon=True).start()
+        logger.info(
+            "Respaldos a GitHub activos (cada %s min%s)",
+            respaldo.minutos(), ", BD restaurada" if restaurado else "",
+        )
+    db.init_db(duenos_antiguos=_roles_antiguos())  # crea/repara tablas y columnas
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -991,13 +1002,6 @@ def main() -> None:
     app.add_error_handler(error_global)
 
     _levantar_servidor_salud()
-    if respaldo.disponible():
-        restaurado = respaldo.restaurar_si_hace_falta()
-        threading.Thread(target=respaldo.bucle, daemon=True).start()
-        logger.info(
-            "Respaldos a GitHub activos (cada %s min%s)",
-            respaldo.minutos(), ", BD restaurada" if restaurado else "",
-        )
     _log_estado_bd()
     logger.info("Bot iniciado. Ctrl+C para detener.")
     app.run_polling()
