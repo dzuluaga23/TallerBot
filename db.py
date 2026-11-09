@@ -110,6 +110,10 @@ def init_db(duenos_antiguos: dict[int, str] | None = None) -> None:
             """
         )
         # Migraciones para BD nacidas antes que los sprints (idempotentes)
+        # Sprint 9: cierre logico de talleres (1 abierto / 0 cerrado)
+        _asegurar_columna(
+            conn, "talleres", "activo", "INTEGER NOT NULL DEFAULT 1"
+        )
         for columna, tipo in (
             ("anulado", "INTEGER NOT NULL DEFAULT 0"),
             ("usuario_id", "INTEGER"),
@@ -231,11 +235,20 @@ def expulsar_usuario(user_id: int, taller_id: int) -> bool:
 
 
 def usuario_por_id(user_id: int) -> sqlite3.Row | None:
-    """El perfil (taller, rol, nombre) de un usuario activo."""
+    """El perfil (taller, rol, nombre) de un usuario ACTIVO de taller ABIERTO.
+
+    Si el taller estaba cerrado la membresia no vale (Sprint 9): el usuario
+    queda 'sin taller' y tiene que unirse a otro (con su codigo o invitacion).
+    """
     with conectar() as conn:
         conn.row_factory = _ROW_FACTORY
         return conn.execute(
-            "SELECT * FROM usuarios WHERE user_id = ? AND activo = 1", (user_id,)
+            """
+            SELECT u.* FROM usuarios u
+            JOIN talleres t ON t.id = u.taller_id
+            WHERE u.user_id = ? AND u.activo = 1 AND t.activo = 1
+            """,
+            (user_id,),
         ).fetchone()
 
 
@@ -330,6 +343,43 @@ def redimir_codigo(codigo: str, taller_id: int, user_id: int) -> bool:
             (codigo, taller_id, user_id, datetime.now().isoformat()),
         )
         return cursor.rowcount == 1
+
+
+# ---------------------- Cierre de talleres (Sprint 9) ----------------------
+
+
+def cerrar_taller(taller_id: int) -> bool:
+    """Cierre LOGICO: activo=0 + revoca invitaciones. False si ya estaba."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE talleres SET activo = 0 "
+            "WHERE id = ? AND activo = 1", (taller_id,)
+        )
+        estaba_abierto = cursor.rowcount == 1
+        if estaba_abierto:
+            # los links de invitacion de un taller cerrado ya no valen nada
+            conn.execute(
+                "UPDATE invitaciones SET activa = 0 WHERE taller_id = ?",
+                (taller_id,),
+            )
+        return estaba_abierto
+
+
+def listar_talleres() -> list[sqlite3.Row]:
+    """Vista del desarrollador: todos los talleres con su estado y cifras."""
+    with conectar() as conn:
+        conn.row_factory = _ROW_FACTORY
+        return conn.execute(
+            """
+            SELECT   t.id, t.nombre, t.activo,
+                (SELECT COUNT(*) FROM usuarios  u
+                 WHERE u.taller_id = t.id AND u.activo = 1)      AS n_staff,
+                (SELECT COUNT(*) FROM trabajos  tr
+                 WHERE tr.taller_id = t.id AND tr.anulado = 0)   AS n_trabajos
+            FROM talleres t
+            ORDER BY t.id
+            """
+        ).fetchall()
 
 
 def crear_solicitud(codigo: str, user_id: int, nombre: str) -> int | None:

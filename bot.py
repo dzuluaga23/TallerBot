@@ -59,6 +59,17 @@ CODIGOS_TALLER: set[str] = {
     if trozo.strip()
 }
 
+# Desarrollador (Sprint 9): IDs de Telegram con permiso de ver/cerrar talleres.
+DESARROLLO_IDS: set[int] = {
+    int(trozo)
+    for trozo in os.getenv("DESARROLLO_ID", "").replace(",", " ").split()
+    if trozo.isdigit()
+}
+
+
+def _es_desarrollo(user_id: int | None) -> bool:
+    return user_id is not None and user_id in DESARROLLO_IDS
+
 
 def _estado_codigo(codigo: str) -> str:
     """'ok' | 'invalido' | 'usado' — lógica de venta separada para poder probarla."""
@@ -659,8 +670,97 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🏢 /datostaller — datos del taller (dueño)\n"
         "🖼️ /logo — sube el logo (foto adjunta, dueño)\n"
         "👥 /personal — staff (solo dueño)\n"
+        "🚫 /cerrartaller — cerrar tu taller (dueño, con confirmación)\n"
         "ℹ️ /ayuda",
     )
+
+
+# ── Cierre de talleres (Sprint 9) ───────────────────────────────────────
+
+async def talleres_dev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/talleres — SOLO desarrollador: todos los talleres con su estado."""
+    if not _es_desarrollo(update.effective_user.id):
+        logger.warning("/talleres sin permiso: id=%s", update.effective_user.id)
+        return  # silencio: ni siquiera confirmamos que exista
+    filas = db.listar_talleres()
+    if not filas:
+        await responder(update, "🫥 Aún no hay talleres creados.")
+        return
+    lineas = []
+    for fila in filas:
+        estado = "✅ activo" if fila["activo"] else "🚫 cerrado"
+        lineas.append(
+            f"#{fila['id']} <b>{fila['nombre']}</b> — {estado}\n"
+            f"     👥 {fila['n_staff']} staff · 🔧 {fila['n_trabajos']} trabajos"
+        )
+    await responder(update, "🏢 <b>Talleres del bot</b>\n" + "\n".join(lineas))
+
+
+async def cerrartaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cerrartaller      -> dueño cierra SU taller (con botón de confirmación)
+       /cerrartaller <id> -> desarrollador cierra el taller que quiera."""
+    user = update.effective_user
+    if _es_desarrollo(user.id) and context.args and context.args[0].isdigit():
+        taller_id = int(context.args[0])
+        if db.cerrar_taller(taller_id):
+            logger.warning("Taller #%s cerrado por desarrollador", taller_id)
+            await responder(
+                update, f"🚫 Taller #{taller_id} cerrado. Su staff ya no puede entrar."
+            )
+        else:
+            await responder(
+                update, f"🤷 El taller #{taller_id} no existe o ya estaba cerrado."
+            )
+        return
+    perfil_usuario = roles.perfil(user.id)
+    if perfil_usuario is None:
+        await responder(
+            update,
+            "🤔 Uso:\n<code>/cerrartaller</code> — cierra tu taller (si eres dueño).",
+        )
+        return
+    if not roles.es_dueno(user.id):
+        await responder(update, "👥 Solo el dueño puede cerrar el taller.")
+        return
+    taller = db.obtener_taller(perfil_usuario["taller_id"])
+    teclado = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🚫 Sí, cerrar mi taller", callback_data=f"cerrar_si:{taller['id']}"
+        ),
+        InlineKeyboardButton("❌ No", callback_data="cerrar_no:0"),
+    ]])
+    await responder(
+        update,
+        f"⚠️ ¿Cerrar tu taller <b>{taller['nombre']}</b>?\n\n"
+        "Nadie del taller podrá usar el bot (ni tú), y tus invitaciones se "
+        "matan. Los registros quedan guardados (nada se borra).\n"
+        "Si te confundiste, hablar con el desarrollador para reabrirlo.",
+        reply_markup=teclado,
+    )
+
+
+@protegido
+async def confirmar_cerrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    accion, taller_id = query.data.split(":")
+    perfil_usuario = roles.perfil(query.from_user.id)
+    puede = (
+        perfil_usuario is not None
+        and perfil_usuario["taller_id"] == int(taller_id)
+        and roles.es_dueno(query.from_user.id)
+    )
+    if not puede:
+        await query.answer("No tuyo 👀", show_alert=True)
+        return
+    if accion == "cerrar_si":
+        db.cerrar_taller(int(taller_id))
+        logger.warning("Taller #%s cerrado por su dueño %s", taller_id, query.from_user.id)
+        await query.edit_message_text(
+            f"🚫 Taller #{taller_id} cerrado. Tus datos quedan guardados."
+        )
+    else:
+        await query.edit_message_text("😌 El taller sigue abierto.")
+    await query.answer()
 
 
 @protegido
@@ -977,6 +1077,9 @@ def main() -> None:
     app.add_handler(CommandHandler("rol", cambiar_rol_cmd))
     app.add_handler(CommandHandler("expulsar", expulsar_cmd))
     app.add_handler(CommandHandler("revocar", revocar_cmd))
+    # Sprint 9: vista y cierre de talleres
+    app.add_handler(CommandHandler("talleres", talleres_dev))
+    app.add_handler(CommandHandler("cerrartaller", cerrartaller))
     # Día a día
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))
@@ -994,6 +1097,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(procesar_solicitud, pattern=r"^soli:"))
     app.add_handler(CallbackQueryHandler(decidir_solicitud, pattern=r"^inv_(si|no):"))
     app.add_handler(CallbackQueryHandler(confirmar_borrar, pattern=r"^borrar_(si|no):"))
+    app.add_handler(CallbackQueryHandler(confirmar_cerrar, pattern=r"^cerrar_(si|no):"))
     # Cualquier otro comando → siempre responde algo
     app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
     # Todo texto que no sea comando es un registro

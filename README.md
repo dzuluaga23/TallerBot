@@ -35,6 +35,8 @@ venv\Scripts\python -m pytest tests -v
 | `/rol ID mecanico\|dueno` | Cambia el rol de alguien del taller |
 | `/expulsar ID` | Desvincula a alguien (borrado lógico: puede volver con otro link) |
 | `/revocar CODIGO` | Mata un link que ya no se usa |
+| `/cerrartaller` | **Dueño cierra SU taller** (con botón de confirmación): nadie entra, invitaciones revocadas, datos quedan guardados |
+| `/talleres` *(desarrollador)* | Lista TODOS los talleres: id, estado (activo/cerrado), staff y trabajos |
 
 Un usuario pertenece a **un solo taller**. Los datos de cada taller están aislados por completo (con tests que lo garantizan).
 
@@ -109,6 +111,8 @@ Así se ve el encabezado de un PDF recién emitido (con el logo en la esquina):
 ```ini
 TELEGRAM_TOKEN=...            # de @BotFather
 CODIGOS_TALLER=VENTA-PEDRO-2026-A1,VENTA-MARIA-0002   # códigos de venta (S8)
+DESARROLLO_ID=9136002456      # tu ID de Telegram: comando /talleres (S9) (opcional)
+TZ=America/Bogota             # hora del taller si corre en la nube (Render/VM)
 ```
 
 Los roles **no** se configuran aquí desde el Sprint 6: se gestionan desde el bot con `/nuevotaller`, `/invitar`, `/personal`, `/rol` y `/expulsar` (la BD es la fuente de verdad). `ADMIN_IDS`/`MECHANICS` solo se leen una vez para migrar instalaciones anteriores a la BD.
@@ -145,6 +149,7 @@ erDiagram
         text direccion
         text telefono
         text logo "'logos\/taller_1.jpg'"
+        int activo "1 abierto, 0 cerrado (S9)"
     }
     USUARIOS {
         int user_id "PK de Telegram"
@@ -200,7 +205,7 @@ TallerBot/
 ├── respaldo.py  # BD <-> repo privado de GitHub (Render free no tiene disco)
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
 ├── render.yaml  # blueprint de deployment en Render (mira DEPLOY.md)
-├── tests/       # 70 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
+├── tests/       # 73 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
 ├── .env         # token (NUNCA subir a GitHub)
@@ -238,7 +243,7 @@ O sea, cuando Render tome el turno, **apaga el bot de tu PC** (o habrá conflict
 | Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
 | PDF | **fpdf2 2.9** | Facturas simples con logo y datos del taller |
 | Configuración | **python-dotenv** | Token en `.env` |
-| Testing | **pytest** | 70 tests unitarios y de integración |
+| Testing | **pytest** | 73 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
 | Infraestructura | **Render (plano free) + cron-job.org** | Hosting 24/7 respaldado con la API de contenidos de GitHub |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
@@ -251,7 +256,7 @@ Decisiones y prácticas de este proyecto más allá del código:
 - **Control de acceso en profundidad (defensa en capas):** primero el decorador `protegido` (perfil del usuario en la BD), después reglas por rol dentro de cada comando, y los callbacks (`/borrar`, invitaciones) re-verifican contra la BD. Tres capas, no una.
 - **Aislamiento de datos multi-tenant:** TODAS las consultas de trabajos llevan `taller_id`; hay tests que garantizan que un taller jamás vea datos de otro.
 - **Códigos de venta = catálogo ≠ estado (S8):** el catálogo de códigos vive en el `.env` (solo editable por el desarrollador) pero el registro de "cuál ya se usó" vive en la BD con redención Atómica (`INSERT OR IGNORE`). Un código es de un solo uso aunque salte reinicios del servidor.
-- **Borrado lógico (soft delete):** ningún registro ni usuario se destruye; `/borrar` marca `anulado=1` y `/expulsar` marca `activo=0`. Trazabilidad para auditorías y errores humanos.
+- **Borrado lógico (soft delete):** ningún registro, usuario ni taller se destruye; `/borrar` marca `anulado=1`, `/expulsar` y `/cerrartaller` marcan `activo=0`. Trazabilidad para auditorías y errores humanos; la reapertura de un taller cerrado la hace el desarrollador.
 - **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas con `ALTER TABLE` silencioso, pero SEGMENTADO POR TABLA (lección aprendida: una migración mal enfocada corrompe el esquema).
 - **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancias` sin `s`) tienen alias y un fallback.
 - **Configuración fuera del código (12-factor "config"):** el `.env` solo lleva secretos; personas y talleres se manejan desde el propio producto. Escalar la operación no toca una línea de código ni requiere redeploy.
@@ -261,4 +266,4 @@ Decisiones y prácticas de este proyecto más allá del código:
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ✅ Nube gratuita (Render free, 24/7 con respaldos a GitHub — guía completa en [DEPLOY.md](DEPLOY.md))
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ✅ Nube gratuita (Render free, 24/7 con respaldos a GitHub — guía completa en [DEPLOY.md](DEPLOY.md)) · 9. ✅ Cierre de talleres (/cerrartaller + /talleres de desarrollador)
