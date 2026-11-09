@@ -60,3 +60,9 @@ def test_listar_talleres_da_estado_y_cifras(bd_temporal):
     bd.cerrar_taller(t2)
     filas = {f["id"]: f for f in bd.listar_talleres()}
     assert filas[t2]["activo"] == 0
+    # reabrir: vuelve con su staff intacto (aunque cerrar mata invitaciones)
+    assert bd.reabrir_taller(t2) is True
+    assert bd.obtener_taller(t2)["activo"] == 1
+    assert bd.usuario_por_id(3) is not None  # el mecanico del t2 tiene acceso
+    assert bd.reabrir_taller(t2) is False    # idempotente: ya estaba abierto
+    assert bd.reabrir_taller(999) is False   # taller inexistente

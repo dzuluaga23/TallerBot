@@ -365,6 +365,20 @@ def cerrar_taller(taller_id: int) -> bool:
         return estaba_abierto
 
 
+def reabrir_taller(taller_id: int) -> bool:
+    """Reapertura: activo=0 -> 1. False si el taller no existe o está abierto.
+
+    El staff vuelve con su membresia intacta; las invitaciones que murieron
+    en el cierre las debe re-emitir el dueno (ver cerrar_taller).
+    """
+    with conectar() as conn:
+        cursor = conn.execute(
+            "UPDATE talleres SET activo = 1 "
+            "WHERE id = ? AND activo = 0", (taller_id,)
+        )
+        return cursor.rowcount == 1
+
+
 def listar_talleres() -> list[sqlite3.Row]:
     """Vista del desarrollador: todos los talleres con su estado y cifras."""
     with conectar() as conn:

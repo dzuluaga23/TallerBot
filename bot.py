@@ -763,6 +763,30 @@ async def confirmar_cerrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
 
+async def abrir_taller_dev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/abrir <id> — desarrollador reabre un taller cerrado (Sprint 9)."""
+    if not _es_desarrollo(update.effective_user.id):
+        logger.warning("/abrir sin permiso: id=%s", update.effective_user.id)
+        return
+    if not context.args or not context.args[0].isdigit():
+        await responder(update, "Uso 🤔 <code>/abrir ID</code> (ej: <code>/talleres</code> te da los IDs)")
+        return
+    taller_id = int(context.args[0])
+    if db.reabrir_taller(taller_id):
+        fila = db.obtener_taller(taller_id)
+        logger.warning("Taller #%s reabierto por el desarrollador", taller_id)
+        await responder(
+            update,
+            f"🔓 Taller <b>{fila['nombre']}</b> (#{taller_id}) REABIERTO.\n"
+            "Su staff vuelve con su cuenta normal. Las invitaciones muertas "
+            "las debe regenerar el dueño con /invitar.",
+        )
+    else:
+        await responder(
+            update, f"🤷 El taller #{taller_id} no existe o ya está abierto."
+        )
+
+
 @protegido
 async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Dueño: todos con nombre. Mecánico: solo los suyos."""
@@ -1080,6 +1104,7 @@ def main() -> None:
     # Sprint 9: vista y cierre de talleres
     app.add_handler(CommandHandler("talleres", talleres_dev))
     app.add_handler(CommandHandler("cerrartaller", cerrartaller))
+    app.add_handler(CommandHandler("abrir", abrir_taller_dev))
     # Día a día
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))

@@ -37,6 +37,7 @@ venv\Scripts\python -m pytest tests -v
 | `/revocar CODIGO` | Mata un link que ya no se usa |
 | `/cerrartaller` | **Dueño cierra SU taller** (con botón de confirmación): nadie entra, invitaciones revocadas, datos quedan guardados |
 | `/talleres` *(desarrollador)* | Lista TODOS los talleres: id, estado (activo/cerrado), staff y trabajos |
+| `/abrir ID` *(desarrollador)* | Reabre un taller cerrado (los datos y el staff vuelven intactos; solo hay que re-emitir invitaciones) |
 
 Un usuario pertenece a **un solo taller**. Los datos de cada taller están aislados por completo (con tests que lo garantizan).
 
@@ -256,7 +257,7 @@ Decisiones y prácticas de este proyecto más allá del código:
 - **Control de acceso en profundidad (defensa en capas):** primero el decorador `protegido` (perfil del usuario en la BD), después reglas por rol dentro de cada comando, y los callbacks (`/borrar`, invitaciones) re-verifican contra la BD. Tres capas, no una.
 - **Aislamiento de datos multi-tenant:** TODAS las consultas de trabajos llevan `taller_id`; hay tests que garantizan que un taller jamás vea datos de otro.
 - **Códigos de venta = catálogo ≠ estado (S8):** el catálogo de códigos vive en el `.env` (solo editable por el desarrollador) pero el registro de "cuál ya se usó" vive en la BD con redención Atómica (`INSERT OR IGNORE`). Un código es de un solo uso aunque salte reinicios del servidor.
-- **Borrado lógico (soft delete):** ningún registro, usuario ni taller se destruye; `/borrar` marca `anulado=1`, `/expulsar` y `/cerrartaller` marcan `activo=0`. Trazabilidad para auditorías y errores humanos; la reapertura de un taller cerrado la hace el desarrollador.
+- **Borrado lógico (soft delete):** ningún registro, usuario ni taller se destruye; `/borrar` marca `anulado=1`, `/expulsar` y `/cerrartaller` marcan `activo=0`. Trazabilidad para auditorías y errores humanos; `/abrir ID` (desarrollador) reabre un taller cerrado.
 - **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas con `ALTER TABLE` silencioso, pero SEGMENTADO POR TABLA (lección aprendida: una migración mal enfocada corrompe el esquema).
 - **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancias` sin `s`) tienen alias y un fallback.
 - **Configuración fuera del código (12-factor "config"):** el `.env` solo lleva secretos; personas y talleres se manejan desde el propio producto. Escalar la operación no toca una línea de código ni requiere redeploy.
