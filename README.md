@@ -37,7 +37,7 @@ venv\Scripts\python -m pytest tests -v
 | `/revocar CODIGO` | Mata un link que ya no se usa |
 | `/cerrartaller` | **Dueño cierra SU taller** (con botón de confirmación): nadie entra, invitaciones revocadas, datos quedan guardados |
 | `/talleres` *(desarrollador)* | Lista TODOS los talleres: id, estado (activo/cerrado), staff y trabajos |
-| `/abrir ID` *(desarrollador)* | Reabre un taller cerrado (los datos y el staff vuelven intactos; solo hay que re-emitir invitaciones) |
+| `/reabrir ID` *(desarrollador)* | Reabre un taller cerrado (los datos y el staff vuelven intactos; solo hay que re-emitir invitaciones) |
 
 Un usuario pertenece a **un solo taller**. Los datos de cada taller están aislados por completo (con tests que lo garantizan).
 
@@ -60,6 +60,7 @@ ABC123 cambio de aceite 45000
 | `/factura ABC123` | Factura PDF del día, todos los trabajos | Factura PDF del día, solo los suyos |
 | `/datostaller nombre=... nit=...` | Edita datos del encabezado de factura | ❌ |
 | `/logo` *(foto adjunta)* | Sube el logo del PDF | ❌ |
+| `/menu` | Botones de un toque: 🌅 Hoy, 🙋 Mis ganancias, 💼 7 días, 💼 Mes, 👥 Personal, 🏢 Datos del taller (los dos últimos solo dueño) | Botones de un toque: sus reportes |
 | `/ayuda` | Menú de comandos | Menú de comandos |
 
 ## 🧾 Factura simple (PDF)
@@ -206,7 +207,7 @@ TallerBot/
 ├── respaldo.py  # BD <-> repo privado de GitHub (Render free no tiene disco)
 ├── roles.py     # Helpers de perfil/rol leidos de la BD
 ├── render.yaml  # blueprint de deployment en Render (mira DEPLOY.md)
-├── tests/       # 73 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos)
+├── tests/       # 79 tests (parser, BD, aislamiento, acceso, factura, códigos, respaldos, formatos, menú)
 ├── logos/       # imagenes de logo subidas por los duenos
 ├── taller.db    # datos (se crea sola; NO se sube a GitHub)
 ├── .env         # token (NUNCA subir a GitHub)
@@ -244,7 +245,7 @@ O sea, cuando Render tome el turno, **apaga el bot de tu PC** (o habrá conflict
 | Base de datos | **SQLite 3** (módulo `sqlite3` de la librería estándar) | Un solo archivo `taller.db`, sin servidor de BD |
 | PDF | **fpdf2 2.9** | Facturas simples con logo y datos del taller |
 | Configuración | **python-dotenv** | Token en `.env` |
-| Testing | **pytest** | 73 tests unitarios y de integración |
+| Testing | **pytest** | 79 tests unitarios y de integración |
 | Control de versiones | **Git + GitHub** | Historial del código |
 | Infraestructura | **Render (plano free) + cron-job.org** | Hosting 24/7 respaldado con la API de contenidos de GitHub |
 | Producto | **Telegram Bot API** | La "interfaz" con la que trabajan los mecánicos (0 costo) |
@@ -257,7 +258,7 @@ Decisiones y prácticas de este proyecto más allá del código:
 - **Control de acceso en profundidad (defensa en capas):** primero el decorador `protegido` (perfil del usuario en la BD), después reglas por rol dentro de cada comando, y los callbacks (`/borrar`, invitaciones) re-verifican contra la BD. Tres capas, no una.
 - **Aislamiento de datos multi-tenant:** TODAS las consultas de trabajos llevan `taller_id`; hay tests que garantizan que un taller jamás vea datos de otro.
 - **Códigos de venta = catálogo ≠ estado (S8):** el catálogo de códigos vive en el `.env` (solo editable por el desarrollador) pero el registro de "cuál ya se usó" vive en la BD con redención Atómica (`INSERT OR IGNORE`). Un código es de un solo uso aunque salte reinicios del servidor.
-- **Borrado lógico (soft delete):** ningún registro, usuario ni taller se destruye; `/borrar` marca `anulado=1`, `/expulsar` y `/cerrartaller` marcan `activo=0`. Trazabilidad para auditorías y errores humanos; `/abrir ID` (desarrollador) reabre un taller cerrado.
+- **Borrado lógico (soft delete):** ningún registro, usuario ni taller se destruye; `/borrar` marca `anulado=1`, `/expulsar` y `/cerrartaller` marcan `activo=0`. Trazabilidad para auditorías y errores humanos; `/reabrir ID` (desarrollador) reabre un taller cerrado.
 - **Migraciones simples idempotentes:** `db.init_db()` crea tablas y agrega columnas con `ALTER TABLE` silencioso, pero SEGMENTADO POR TABLA (lección aprendida: una migración mal enfocada corrompe el esquema).
 - **Fail-safe en superficie:** `error_global` captura toda excepción, loguea y responde algo amable — *ningún handler tumba al bot*. Nunca silencio: hasta los comandos mal escritos (`/ganancias` sin `s`) tienen alias y un fallback.
 - **Configuración fuera del código (12-factor "config"):** el `.env` solo lleva secretos; personas y talleres se manejan desde el propio producto. Escalar la operación no toca una línea de código ni requiere redeploy.
@@ -267,4 +268,4 @@ Decisiones y prácticas de este proyecto más allá del código:
 
 ## 📖 Sprints del proyecto
 
-0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ✅ Nube gratuita (Render free, 24/7 con respaldos a GitHub — guía completa en [DEPLOY.md](DEPLOY.md)) · 9. ✅ Cierre de talleres (/cerrartaller + /talleres de desarrollador)
+0. ✅ Esqueleto y setup · 1. ✅ Registro de trabajos · 2. ✅ Comandos de consulta · 3. ✅ Seguridad (lista blanca + logs) · 5. ✅ Roles dueño/mecánico + firma · 6. ✅ Multi-tenant (talleres, invitaciones, onboarding) · 7. ✅ Factura PDF con datos del taller · 8. ✅ Códigos de venta (modalidad comercial) · 4. ✅ Nube gratuita (Render free, 24/7 con respaldos a GitHub — guía completa en [DEPLOY.md](DEPLOY.md)) · 9. ✅ Cierre/reapertura de talleres (/cerrartaller · /reabrir de desarrollador) · 10. ✅ Menú con botones (/menu + atajos en /start)

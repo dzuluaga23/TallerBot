@@ -25,6 +25,8 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -193,11 +195,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     nombre_taller = db.obtener_taller(perfil_usuario["taller_id"])["nombre"]
+    es_dueno = roles.es_dueno(user.id)
     await responder(
         update,
         f"🛠️ <b>{nombre_taller}</b> — hola {user.first_name}!\n"
         "Registra cada trabajo así: placa + trabajo + precio:\n"
-        f"{EJEMPLO}\n/ayuda → todos los comandos",
+        f"{EJEMPLO}\n/menu → botones de reporte · /ayuda → comandos",
+        reply_markup=_teclado_menu(es_dueno),
     )
 
 
@@ -422,23 +426,7 @@ async def personal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not roles.es_dueno(user.id):
         await responder(update, "🙅 Esto solo lo puede hacer un dueño.")
         return
-    personal_fila = db.personal_del_taller(roles.taller_de(user.id))
-    dueños, mecanicos = [], []
-    for fila in personal_fila:
-        if not fila["activo"]:
-            continue
-        linea = f"▸ {fila['nombre']} (ID {fila['user_id']})"
-        (dueños if fila["rol"] == db.ROL_DUENO else mecanicos).append(linea)
-    texto = "👥 <b>Personal del taller</b>\n👑 Dueños:\n" + "\n".join(dueños)
-    if mecanicos:
-        texto += "\n🔧 Mecánicos:\n" + "\n".join(mecanicos)
-    texto += (
-        "\n\nManejo:\n"
-        "<code>/rol ID mecanico|dueno</code>\n"
-        "<code>/expulsar ID</code>\n"
-        "<code>/invitar mecanico|dueno</code>"
-    )
-    await responder(update, texto)
+    await responder(update, _texto_personal(roles.taller_de(user.id)))
 
 
 @protegido
@@ -523,24 +511,7 @@ async def datostaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     taller_id = roles.taller_de(user.id)
     if not context.args:
-        fila_taller = db.obtener_taller(taller_id)
-        pendiente = [
-            campo for campo in ("nit", "direccion", "telefono")
-            if not fila_taller[campo]
-        ]
-        await responder(
-            update,
-            "🏢 <b>Datos del taller</b>\n"
-            f"▸ Nombre: {fila_taller['nombre']}\n"
-            f"▸ NIT: {fila_taller['nit'] or '—'}\n"
-            f"▸ Dirección: {fila_taller['direccion'] or '—'}\n"
-            f"▸ Teléfono: {fila_taller['telefono'] or '—'}\n"
-            f"▸ Logo: {'🖼️' if fila_taller['logo'] else 'sin subir (manda una foto con /logo en el pie de foto)'}\n\n"
-            "Editar (los valores admiten espacios):\n"
-            "<code>/datostaller nombre=Taller Los Pistones</code>\n"
-            "<code>/datostaller nit=900123-4 tel=3001112333 dir=Calle 45 #12-30</code>"
-            + (f"\n\nFaltan: {', '.join(pendiente)}" if pendiente else ""),
-        )
+        await responder(update, _texto_datos_taller(taller_id))
         return
     campos = _parsear_pares(context.args)
     sin_validar = campos.pop("tel", None)
@@ -556,7 +527,7 @@ async def datostaller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 def _parsear_pares(tokens: list[str]) -> dict[str, str]:
-    """conj天涯ere ['nit=900123-4', 'dir...', 'Calle', '45'] -> {'nit': ..., 'dir': ...}
+    """Convierte ['nit=900123-4', 'dir...', 'Calle', '45'] -> {'nit': ..., 'dir': ...}
     Cada clave termina cuando aparece la siguiente con '='."""
     pares: dict[str, str] = {}
     i = 0
@@ -670,6 +641,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🏢 /datostaller — datos del taller (dueño)\n"
         "🖼️ /logo — sube el logo (foto adjunta, dueño)\n"
         "👥 /personal — staff (solo dueño)\n"
+        "📱 /menu — atajos con botones\n"
         "🚫 /cerrartaller — cerrar tu taller (dueño, con confirmación)\n"
         "ℹ️ /ayuda",
     )
@@ -763,13 +735,13 @@ async def confirmar_cerrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
 
-async def abrir_taller_dev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/abrir <id> — desarrollador reabre un taller cerrado (Sprint 9)."""
+async def reabrir_taller_dev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reabrir <id> — desarrollador reabre un taller cerrado (Sprint 9)."""
     if not _es_desarrollo(update.effective_user.id):
-        logger.warning("/abrir sin permiso: id=%s", update.effective_user.id)
+        logger.warning("/reabrir sin permiso: id=%s", update.effective_user.id)
         return
     if not context.args or not context.args[0].isdigit():
-        await responder(update, "Uso 🤔 <code>/abrir ID</code> (ej: <code>/talleres</code> te da los IDs)")
+        await responder(update, "Uso 🤔 <code>/reabrir ID</code> (ej: <code>/talleres</code> te da los IDs)")
         return
     taller_id = int(context.args[0])
     if db.reabrir_taller(taller_id):
@@ -787,26 +759,179 @@ async def abrir_taller_dev(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+# ── Menú con botones (Sprint 10) ───────────────────────────────────────
+
+TEXTO_MENU = "📱 <b>Menú</b> — elige un reporte:"
+
+
+@protegido
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/menu — atajos de un toque: los reportes se muestran como botones."""
+    es_dueno = roles.es_dueno(update.effective_user.id)
+    await responder(
+        update, TEXTO_MENU, reply_markup=_teclado_menu(es_dueno)
+    )
+
+
+@protegido
+async def manejar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Un botón del menú: EDITA el mismo mensaje con el reporte pedido."""
+    query = update.callback_query
+    accion = query.data.split(":", 1)[1]
+    user_id = query.from_user.id
+    es_dueno = roles.es_dueno(user_id)
+    perfil_usuario = roles.perfil(user_id)
+    if perfil_usuario is None:
+        await query.answer("Tu taller ya no está activo 💤", show_alert=True)
+        return
+    taller_id = perfil_usuario["taller_id"]
+    if accion == "hoy":
+        texto = _texto_historial_hoy(taller_id, user_id, es_dueno)
+    elif accion == "mis":
+        texto = _texto_ganancias(taller_id, user_id, None, False, False)
+    elif accion == "gan7":
+        texto = _texto_ganancias(taller_id, user_id, 7, False, es_dueno)
+    elif accion == "ganmes":
+        texto = _texto_ganancias(taller_id, user_id, None, True, es_dueno)
+    elif accion == "personal":
+        texto = _texto_personal(taller_id) if es_dueno else "🙅 Solo el dueño."
+    elif accion == "datos":
+        texto = _texto_datos_taller(taller_id) if es_dueno else "🙅 Solo el dueño."
+    else:
+        await query.answer()
+        return
+    try:
+        await query.edit_message_text(
+            texto,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_teclado_menu(es_dueno),
+        )
+    except BadRequest as error:
+        if "not modified" not in str(error).lower():
+            raise  # si es idéntico (mismo botón 2 veces), no pasa nada
+    await query.answer()
+
+
+# ── Builders puros del menú (Sprint 10) ────────────────────────────────
+# Texto y teclado separados de los handlers para que los botones del
+# menú y los comandos usen UNA sola fuente de verdad (y testée la lógica).
+
+
+def _texto_historial_hoy(taller_id: int, user_id: int, es_dueno: bool) -> str:
+    """Reporte de hoy: dueño ve el taller entero, mecánico solo lo suyo."""
+    filas = db.trabajos_hoy(taller_id, None if es_dueno else user_id)
+    if not filas:
+        return "😌 Sin trabajos registrados hoy."
+    total = sum(fila["precio"] for fila in filas)
+    lista = "\n".join(_linea_trabajo(f, con_mecanico=es_dueno) for f in filas)
+    titulo = "Trabajos de hoy" if es_dueno else "Tus trabajos de hoy"
+    return (
+        f"🌅 <b>{titulo}</b>\n{lista}\n\n"
+        f"💰 <b>Total{' del día' if es_dueno else ''}: {formatear_dinero(total)}</b>"
+        f" ({len(filas)} trabajo{'s' if len(filas) != 1 else ''})"
+    )
+
+
+def _texto_ganancias(
+    taller_id: int, user_id: int, dias: int | None, mes: bool, ver_todos: bool
+) -> str:
+    """Resumen del periodo. Dueño (ver_todos): total + desglose por mecánico."""
+    if ver_todos:
+        etiqueta, cantidad, suma = db.resumen_periodo(taller_id, dias=dias, mes=mes)
+        texto = f"💼 <b>Ganancias de {etiqueta}</b>\n💰 <b>{formatear_dinero(suma)}</b>"
+        _, desglose = db.desglose_mecanicos(taller_id, dias=dias, mes=mes)
+        if desglose:
+            lineas = "\n".join(
+                f"👤 {nombre}: {formatear_dinero(suma_monto)} ({cantidad_personas})"
+                for nombre, cantidad_personas, suma_monto in desglose
+            )
+            texto += f"\n\n<b>Por mecánico</b>:\n{lineas}"
+        elif cantidad == 0:
+            texto = f"😌 Sin trabajos en {etiqueta}."
+        return texto
+    etiqueta, cantidad, suma = db.resumen_periodo(
+        taller_id, dias=dias, mes=mes, mecanico_id=user_id
+    )
+    if cantidad == 0:
+        return f"😌 Sin trabajos tuyos en {etiqueta}."
+    return (
+        f"💼 <b>Tus ganancias de {etiqueta}</b>\n"
+        f"💰 <b>{formatear_dinero(suma)}</b>\n"
+        f"📋 {cantidad} trabajo{'s' if cantidad != 1 else ''}"
+    )
+
+
+def _texto_personal(taller_id: int) -> str:
+    """Lista del staff con las instrucciones de manejo (dueño)."""
+    personal_fila = db.personal_del_taller(taller_id)
+    duenos, mecanicos = [], []
+    for fila in personal_fila:
+        if not fila["activo"]:
+            continue
+        linea = f"▸ {fila['nombre']} (ID {fila['user_id']})"
+        (duenos if fila["rol"] == db.ROL_DUENO else mecanicos).append(linea)
+    texto = "👥 <b>Personal del taller</b>\n👑 Dueños:\n" + "\n".join(duenos)
+    if mecanicos:
+        texto += "\n🔧 Mecánicos:\n" + "\n".join(mecanicos)
+    texto += (
+        "\n\nManejo:\n"
+        "<code>/rol ID mecanico|dueno</code>\n"
+        "<code>/expulsar ID</code>\n"
+        "<code>/invitar mecanico|dueno</code>"
+    )
+    return texto
+
+
+def _texto_datos_taller(taller_id: int) -> str:
+    """Vista de los datos comerciales del taller (dueño)."""
+    fila_taller = db.obtener_taller(taller_id)
+    pendiente = [
+        campo for campo in ("nit", "direccion", "telefono")
+        if not fila_taller[campo]
+    ]
+    return (
+        "🏢 <b>Datos del taller</b>\n"
+        f"▸ Nombre: {fila_taller['nombre']}\n"
+        f"▸ NIT: {fila_taller['nit'] or '—'}\n"
+        f"▸ Dirección: {fila_taller['direccion'] or '—'}\n"
+        f"▸ Teléfono: {fila_taller['telefono'] or '—'}\n"
+        f"▸ Logo: {'🖼️' if fila_taller['logo'] else 'sin subir (manda una foto con /logo en el pie de foto)'}\n\n"
+        "Editar (los valores admiten espacios):\n"
+        "<code>/datostaller nombre=Taller Los Pistones</code>\n"
+        "<code>/datostaller nit=900123-4 tel=3001112333 dir=Calle 45 #12-30</code>"
+        + (f"\n\nFaltan: {', '.join(pendiente)}" if pendiente else "")
+    )
+
+
+def _teclado_menu(es_dueno: bool) -> InlineKeyboardMarkup:
+    """Botones del /menu: reportes de un toque (los datos siguen tecleándose)."""
+    filas = [
+        [InlineKeyboardButton("🌅 Hoy", callback_data="mnu:hoy")],
+        [
+            InlineKeyboardButton("🙋 Mis ganancias", callback_data="mnu:mis"),
+            InlineKeyboardButton("💼 7 días", callback_data="mnu:gan7"),
+            InlineKeyboardButton("💼 Mes", callback_data="mnu:ganmes"),
+        ],
+    ]
+    if es_dueno:
+        filas.append([
+            InlineKeyboardButton("👥 Personal", callback_data="mnu:personal"),
+            InlineKeyboardButton("🏢 Datos taller", callback_data="mnu:datos"),
+        ])
+    return InlineKeyboardMarkup(filas)
+
+
 @protegido
 async def historialdia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Dueño: todos con nombre. Mecánico: solo los suyos."""
     perfil_usuario = _perfil(update)
-    es_dueno = roles.es_dueno(update.effective_user.id)
-    filas = db.trabajos_hoy(
-        perfil_usuario["taller_id"],
-        None if es_dueno else update.effective_user.id,
-    )
-    if not filas:
-        await responder(update, "😌 Sin trabajos registrados hoy.")
-        return
-    total = sum(fila["precio"] for fila in filas)
-    lista = "\n".join(_linea_trabajo(f, con_mecanico=es_dueno) for f in filas)
-    titulo = "Trabajos de hoy" if es_dueno else "Tus trabajos de hoy"
     await responder(
         update,
-        f"🌅 <b>{titulo}</b>\n{lista}\n\n"
-        f"💰 <b>Total{' del día' if es_dueno else ''}: {formatear_dinero(total)}</b>"
-        f" ({len(filas)} trabajo{'s' if len(filas) != 1 else ''})",
+        _texto_historial_hoy(
+            perfil_usuario["taller_id"],
+            update.effective_user.id,
+            roles.es_dueno(update.effective_user.id),
+        ),
     )
 
 
@@ -838,34 +963,17 @@ async def _reporte_ganancias(
         )
         return
     perfil_usuario = _perfil(update)
-    taller_id = perfil_usuario["taller_id"]
     ver_todos = roles.es_dueno(update.effective_user.id) and not solo_propias
-
-    if ver_todos:
-        etiqueta, cantidad, suma = db.resumen_periodo(taller_id, dias=dias, mes=mes)
-        texto = f"💼 <b>Ganancias de {etiqueta}</b>\n💰 <b>{formatear_dinero(suma)}</b>"
-        _, desglose = db.desglose_mecanicos(taller_id, dias=dias, mes=mes)
-        if desglose:
-            lineas = "\n".join(
-                f"👤 {nombre}: {formatear_dinero(suma_monto)} ({cantidad_personas})"
-                for nombre, cantidad_personas, suma_monto in desglose
-            )
-            texto += f"\n\n<b>Por mecánico</b>:\n{lineas}"
-        elif cantidad == 0:
-            texto = f"😌 Sin trabajos en {etiqueta}."
-    else:
-        etiqueta, cantidad, suma = db.resumen_periodo(
-            taller_id, dias=dias, mes=mes, mecanico_id=update.effective_user.id
-        )
-        if cantidad == 0:
-            await responder(update, f"😌 Sin trabajos tuyos en {etiqueta}.")
-            return
-        texto = (
-            f"💼 <b>Tus ganancias de {etiqueta}</b>\n"
-            f"💰 <b>{formatear_dinero(suma)}</b>\n"
-            f"📋 {cantidad} trabajo{'s' if cantidad != 1 else ''}"
-        )
-    await responder(update, texto)
+    await responder(
+        update,
+        _texto_ganancias(
+            perfil_usuario["taller_id"],
+            update.effective_user.id,
+            dias,
+            mes,
+            ver_todos,
+        ),
+    )
 
 
 @protegido
@@ -1104,7 +1212,9 @@ def main() -> None:
     # Sprint 9: vista y cierre de talleres
     app.add_handler(CommandHandler("talleres", talleres_dev))
     app.add_handler(CommandHandler("cerrartaller", cerrartaller))
-    app.add_handler(CommandHandler("abrir", abrir_taller_dev))
+    app.add_handler(CommandHandler("reabrir", reabrir_taller_dev))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CallbackQueryHandler(manejar_menu, pattern=r"^mnu:"))
     # Día a día
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("historialdia", historialdia))
